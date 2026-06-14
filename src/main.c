@@ -1,8 +1,10 @@
 // src/main.c
-#include <stdio.h>
+#include "cli.h"
+#include "commands.h"
 
-int main(void) {
-  printf("Hello, World!\n");
+int main(int argc, char **argv) {
+  register_all_commands();
+  cli_run(argc, argv);
 
   return 0;
 }
