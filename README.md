@@ -1,2 +1,31 @@
 # p2p-chat-openssl
-P2P Chat — secure serverless chat for local networks. Clients communicate directly, traffic is encrypted, connections are verified using certificates.
+
+Децентрализованный чат для локальной сети. В разработке.
+
+## Цель
+
+Общение без сервера. Все узлы равноправны.
+Обнаружение через UDP, защита через TLS, идентификация через fingerprint сертификата.
+
+## Статус
+
+- [x] Проектирование архитектуры
+- [ ] Обнаружение узлов (UDP Multicast)
+- [ ] TCP-соединения
+- [ ] TLS-шифрование и проверка сертификатов
+- [ ] Консольный интерфейс
+- [ ] Приватные сообщения
+- [ ] Передача файлов
+- [ ] Тесты и расширенный функционал 
+
+## Быстрый старт (когда будет готово)
+
+``` bash
+    cd certs && ./gen_certs.sh
+    make
+    make run
+```
+
+## Технологии
+
+Linux, Make, OpenSSL, epoll.
