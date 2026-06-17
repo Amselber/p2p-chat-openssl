@@ -1,32 +1,26 @@
-// src/cli.h - интерфейс команд
+// src/cli.h
 #ifndef CLI_H
 #define CLI_H
 
-// Результат выполнения команды
 typedef struct {
   int success;         // 0 = ошибка, 1 = успех
-  const char *message; // сообщение для пользователя
+  const char *message; // статическая строка или NULL
 } CommandResult;
 
-// Тип функции-обработчика команды
-typedef CommandResult *(*CommandHandler)(int argc, char **argv);
+typedef CommandResult (*CommandHandler)(int argc, char **argv);
 
-// Структура команды
 typedef struct {
   const char *name;
   const char *help;
   CommandHandler handler;
 } Command;
 
-// Регистрация и выполнение команд
 void cli_register(const Command *cmd);
 void cli_run(int argc, char **argv);
+void cli_show_help(void);
 
-// Вспомогательные функции для создания результатов
-CommandResult *result_success(const char *message);
-CommandResult *result_error(const char *message);
-
-// Освобождение результата
-void result_free(CommandResult *result);
+// Вспомогательные функции (возвращают static)
+CommandResult result_success(const char *message);
+CommandResult result_error(const char *message);
 
 #endif

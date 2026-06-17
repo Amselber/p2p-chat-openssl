@@ -1,73 +1,50 @@
-// src/cli.c - движок команд
+// src/cli.c
 #include "cli.h"
 #include <stdio.h>
-#include <stdlib.h>
 #include <string.h>
 
-#define MAX_COMMANDS 32
+#define MAX_CMDS 32
+static Command cmds[MAX_CMDS];
+static int ncmds = 0;
 
-static Command commands[MAX_COMMANDS];
-static int command_count = 0;
-
-void cli_register(const Command *cmd) {
-  if (command_count < MAX_COMMANDS) {
-    commands[command_count++] = *cmd;
-  }
+void cli_register(const Command *c) {
+  if (ncmds < MAX_CMDS)
+    cmds[ncmds++] = *c;
 }
 
-CommandResult *result_success(const char *message) {
-  CommandResult *r = malloc(sizeof(CommandResult));
-  r->success = 1;
-  r->message = message;
+CommandResult result_success(const char *m) {
+  CommandResult r = {1, m};
   return r;
 }
 
-CommandResult *result_error(const char *message) {
-  CommandResult *r = malloc(sizeof(CommandResult));
-  r->success = 0;
-  r->message = message;
+CommandResult result_error(const char *m) {
+  CommandResult r = {0, m};
   return r;
 }
 
-void result_free(CommandResult *r) {
-  if (r) {
-    free(r);
-  }
-}
-
-static void show_help(const char *prog_name) {
-  printf("Usage: %s <command> [args...]\n\n", prog_name);
+void cli_show_help(void) {
   printf("Commands:\n");
-  for (int i = 0; i < command_count; i++) {
-    printf("  %-12s %s\n", commands[i].name, commands[i].help);
+  for (int i = 0; i < ncmds; i++) {
+    printf("  /%-12s %s\n", cmds[i].name, cmds[i].help);
   }
 }
 
 void cli_run(int argc, char **argv) {
-  if (argc < 2) {
-    show_help(argv[0]);
+  if (argc < 2)
     return;
-  }
 
-  for (int i = 0; i < command_count; i++) {
-    if (strcmp(commands[i].name, argv[1]) == 0) {
-      // Вызов обработчика
-      CommandResult *result = commands[i].handler(argc - 2, argv + 2);
-
-      // Вывод результата
-      if (result->success) {
-        if (result->message)
-          printf("%s\n", result->message);
+  for (int i = 0; i < ncmds; i++) {
+    if (!strcmp(cmds[i].name, argv[1])) {
+      CommandResult r = cmds[i].handler(argc - 2, argv + 2);
+      if (r.success) {
+        if (r.message)
+          printf("%s\n", r.message);
       } else {
-        fprintf(stderr, "Error: %s\n", result->message);
+        fprintf(stderr, "Error: %s\n", r.message);
       }
-
-      result_free(result);
       return;
     }
   }
 
-  // Команда не найдена
-  fprintf(stderr, "Unknown command: %s\n", argv[1]);
-  show_help(argv[0]);
+  fprintf(stderr, "Unknown: %s\n", argv[1]);
 }
