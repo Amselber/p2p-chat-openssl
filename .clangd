@@ -1,9 +1,20 @@
 # .clangd (корень проекта)
 CompileFlags:
   Add:
-    - "-Isrc"
-    - "-Iinclude"
-    - "-Iexternal/Unity/src"
-    - "-Itests"
-    - "-Wall"
-    - "-std=c11"
+    - -Isrc
+    - -Iinclude
+    - -Iexternal/Unity/src
+    - -Itests
+    - -std=c11
+    - -Wall # базовые предупреждения
+    - -Wextra # дополнительные предупреждения
+    - -Wpedantic # строгое следование стандарту
+    - -Werror # превратить предупреждения в ошибки
+
+    # Форматные строки
+    - -Wformat=2 # проверка printf/scanf-like функций
+
+    # Приведения типов и знаковость
+    - -Wsign-conversion # неявные преобразования знаковых/беззнаковых
+    - -Wconversion # все опасные преобразования типов
+    - -Wcast-align # приведение указателей с нарушением выравниванияk
