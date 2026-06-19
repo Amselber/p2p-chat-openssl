@@ -1,0 +1,9 @@
+# .clangd (корень проекта)
+CompileFlags:
+  Add:
+    - "-Isrc"
+    - "-Iinclude"
+    - "-Iexternal/Unity/src"
+    - "-Itests"
+    - "-Wall"
+    - "-std=c11"
