@@ -18,7 +18,8 @@
 #   -g            : отладочная информация (для gdb)
 # LDFLAGS : флаги линковщика (пока пусто, можно добавить -lm, -lpthread и т.п.)
 CC = gcc
-CFLAGS = -Wall -Wextra -std=c11 -g
+CFLAGS = -Wall -Wextra -Wpedantic -Werror -Wformat=2 -Wsign-conversion \
+				 -Wcast-align -std=c11 -g
 LDFLAGS =
 
 # -----------------------------------------------------------------------------
