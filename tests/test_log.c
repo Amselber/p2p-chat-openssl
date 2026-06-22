@@ -3,6 +3,9 @@
 #include "log.h"
 #include "unity.h"
 #include "unity_internals.h"
+#include <asm-generic/errno-base.h>
+#include <asm-generic/errno.h>
+#include <errno.h>
 #include <stdarg.h>
 #include <stdio.h>
 #include <string.h>
@@ -79,6 +82,25 @@ void test_log_format_has_level_prefix_error(void) {
   TEST_ASSERT_NOT_NULL(strstr(g_capture, "[ERROR]"));
 }
 
+void test_log_format_with_args(void) {
+  log_info("value is %d", 42);
+  TEST_ASSERT_NOT_NULL(strstr(g_capture, "value is 42"));
+}
+
+void test_log_errno_contains_errno_string(void) {
+  errno = ECONNREFUSED;
+  log_errno("connect failed");
+  TEST_ASSERT_NOT_NULL(strstr(g_capture, "connect failed"));
+  TEST_ASSERT_NOT_NULL(strstr(g_capture, "errno=111"));
+  TEST_ASSERT_NOT_NULL(strstr(g_capture, "Connection refused"));
+}
+
+void test_log_errno_contains_err_level(void) {
+  errno = EACCES;
+  log_error("permission denied");
+  TEST_ASSERT_NOT_NULL(strstr(g_capture, "[ERROR]"));
+}
+
 // Запуск
 int main_test_log(void) {
   UNITY_BEGIN();
@@ -89,6 +111,9 @@ int main_test_log(void) {
   RUN_TEST(test_log_debug_contains_message);
   RUN_TEST(test_log_format_has_level_prefix);
   RUN_TEST(test_log_format_has_level_prefix_error);
+  RUN_TEST(test_log_format_with_args);
+  RUN_TEST(test_log_errno_contains_errno_string);
+  RUN_TEST(test_log_errno_contains_err_level);
 
   return UNITY_END();
 }
