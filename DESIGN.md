@@ -2,7 +2,7 @@
 
 ```
 Статус: В разработке
-Версия: 0.1.0
+Версия: 0.4.0
 ```
 
 ## 1. Суть
@@ -30,6 +30,32 @@ main.c → config → log → daemon → discovery (UDP)
 | Реестр | `node.h/c` | Учёт узлов: fp, name, fd |
 
 ---
+
+```mermaid
+graph LR
+    subgraph "src/"
+        MAIN2[main.c]
+        CONFIG2[config.h/c]
+        LOG2[log.h/c]
+        CLI2[cli.h/c]
+        DAEMON2[daemon.h/c]
+        DISCOVERY2[discovery.h/c]
+        TRANSPORT2[transport.h/c]
+        NODE2[node.h/c]
+    end
+
+    MAIN2 --> CONFIG2
+    MAIN2 --> LOG2
+    MAIN2 --> DAEMON2
+
+    DAEMON2 --> CLI2
+    DAEMON2 --> DISCOVERY2
+    DAEMON2 --> TRANSPORT2
+    DAEMON2 --> NODE2
+
+    TRANSPORT2 --> CONFIG2
+    DISCOVERY2 --> CONFIG2
+```
 
 ## 3. Ключевые решения
 
