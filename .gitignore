@@ -57,3 +57,6 @@ dkms.conf
 # Directories
 build/
 bin/
+*.log
+.vscode/
+compile_commands.json
