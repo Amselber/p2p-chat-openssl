@@ -1,6 +1,7 @@
 // src/main.c
 #include "cli.h"
 #include "config.h"
+#include "daemon.h"
 #include "log.h"
 #include "version.h"
 #include <stdio.h>
@@ -25,5 +26,5 @@ int main(int argc, char **argv) {
   log_debug("Multicast: %s:%u", g_config.multicast_addr,
             g_config.multicast_port);
 
-  return 0;
+  return daemon_run();
 }
