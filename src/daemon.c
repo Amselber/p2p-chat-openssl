@@ -3,6 +3,7 @@
 #include "cli.h"
 #include "config.h"
 #include "log.h"
+#include "node.h"
 #include <fcntl.h>
 #include <signal.h>
 #include <stdio.h>
@@ -18,6 +19,24 @@ static void on_signal(int s) {
   (void)s;
   log_info("Signal %d received, shutting down", s);
   running = 0;
+}
+
+// ─── Вспомогательные функции для node_each ───
+
+struct msg_args {
+  const char *fp;
+  int *found_fd;
+};
+
+static void print_node(node_t *n, void *arg) {
+  (void)arg;
+  printf("  %s [%s]\n", n->fp, n->fd != -1 ? "online" : "offline");
+}
+
+static void find_node_fd(node_t *n, void *arg) {
+  struct msg_args *a = (struct msg_args *)arg;
+  if (!strcmp(n->fp, a->fp) && n->fd != -1)
+    *a->found_fd = n->fd;
 }
 
 // CLI Commands
@@ -66,12 +85,52 @@ static CommandResult cmd_config(int argc, char **argv) {
   return result_success(buf);
 }
 
+// List nodes
+static CommandResult cmd_nodes(int argc, char **argv) {
+  (void)argc;
+  (void)argv;
+  log_debug("Listing nodes");
+  printf("\rNodes:\n");
+  node_each(print_node, NULL);
+  return result_success(NULL);
+}
+
+// Send message
+static CommandResult cmd_msg(int argc, char **argv) {
+  if (argc < 2) {
+    log_warn("/msg called with insufficient arguments");
+    return result_error("Usage: /msg <fp> <text>");
+  }
+
+  int found_fd = -1;
+  struct msg_args a = {argv[0], &found_fd};
+  node_each(find_node_fd, &a);
+
+  if (found_fd == -1) {
+    log_warn("Node not online: %s", argv[0]);
+    return result_error("Node not online");
+  }
+
+  static char text[4096];
+  text[0] = 0;
+  for (int i = 1; i < argc; ++i) {
+    if (i > 1)
+      strcat(text, " ");
+    strcat(text, argv[i]);
+  }
+
+  log_debug("[msg → %s]: %s", argv[0], text);
+  return result_success(NULL);
+}
+
 // Регистрация всех команд
 static void register_commands(void) {
   static Command cmds[] = {{"quit", "Exit", cmd_quit},
                            {"help", "Help", cmd_help},
                            {"echo", "Echo", cmd_echo},
                            {"config", "Config", cmd_config},
+                           {"msg", "Send message", cmd_msg},
+                           {"nodes", "List nodes", cmd_nodes},
                            {NULL, NULL, NULL}};
 
   int i;
@@ -83,6 +142,12 @@ static void register_commands(void) {
 
 // Запуск демона
 int daemon_run(void) {
+  // ── Тестовые ноды (без сети) ──
+  node_add("a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0c1d2e3f4a5b6c7d8e9f0a1b2",
+           10);
+  node_add("b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0c1d2e3f4a5b6c7d8e9f0a1b2c3",
+           -1);
+
   log_info("Daemon starting");
   // SIGINT SIGTERM register handler
   signal(SIGINT, on_signal);
