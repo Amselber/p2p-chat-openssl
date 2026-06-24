@@ -2,12 +2,8 @@
 #include "config.h"
 #include "log.h"
 #include "unity.h"
-#include "unity_internals.h"
-#include <asm-generic/errno-base.h>
-#include <asm-generic/errno.h>
 #include <errno.h>
 #include <stdarg.h>
-#include <stdio.h>
 #include <string.h>
 
 // Перехват вывода для проверки
