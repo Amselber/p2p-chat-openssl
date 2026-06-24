@@ -1,6 +1,7 @@
 // src/daemon.c
 #include "daemon.h"
 #include "cli.h"
+#include "config.h"
 #include "log.h"
 #include <fcntl.h>
 #include <signal.h>
@@ -51,11 +52,26 @@ static CommandResult cmd_echo(int argc, char **argv) {
   return result_success(buf);
 }
 
+// Config
+static CommandResult cmd_config(int argc, char **argv) {
+  (void)argc;
+  (void)argv;
+  static char buf[512];
+  snprintf(buf, sizeof(buf),
+           "multicast: %s:%u\n"
+           "hello: %d sec\n"
+           "my_fp: %s",
+           g_config.multicast_addr, g_config.multicast_port,
+           g_config.hello_interval, g_config.my_fp);
+  return result_success(buf);
+}
+
 // Регистрация всех команд
 static void register_commands(void) {
   static Command cmds[] = {{"quit", "Exit", cmd_quit},
                            {"help", "Help", cmd_help},
                            {"echo", "Echo", cmd_echo},
+                           {"config", "Config", cmd_config},
                            {NULL, NULL, NULL}};
 
   int i;
