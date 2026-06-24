@@ -3,10 +3,16 @@
 
 extern int main_test_config(void);
 extern int main_test_log(void);
+extern int main_test_node(void);
+
 extern void setUp_log(void);
+extern void setUp_node(void);
 
 // Эта функция вызывается перед КАЖДЫМ тестом
-void setUp(void) { setUp_log(); }
+void setUp(void) {
+  setUp_log();
+  setUp_node();
+}
 
 // Эта функция вызывается после КАЖДОГО теста
 void tearDown(void) {}
@@ -17,6 +23,7 @@ int main(void) {
 
   failures += main_test_config();
   failures += main_test_log();
+  failures += main_test_node();
 
   return failures > 0 ? 1 : 0;
 }
