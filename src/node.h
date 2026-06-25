@@ -16,8 +16,9 @@
 #define MAX_NODES 64
 
 typedef struct {
-  char fp[65]; // fingerprint: 64 символа + '\0'
-  int fd;      // файловый дескриптор TCP-соединения, -1 если нет
+  char fp[65];   // fingerprint: 64 символа + '\0'
+  char name[64]; // Имя участника
+  int fd;        // файловый дескриптор TCP-соединения, -1 если нет
 } node_t;
 
 /*
@@ -25,7 +26,7 @@ typedef struct {
  * Если нода с таким fp уже существует — обновляет fd.
  * Если реестр заполнен — возвращает NULL.
  */
-node_t *node_add(const char *fp, int fd);
+node_t *node_add(const char *fp, const char *name, int fd);
 
 /*
  * Ищет ноду по файловому дескриптору.
