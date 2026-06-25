@@ -21,25 +21,32 @@ static void on_signal(int s) {
   running = 0;
 }
 
-// ─── Вспомогательные функции для node_each ───
-
+// Вспомогательные функции для node_each
 struct msg_args {
   const char *fp;
+  const char *name;
   int *found_fd;
 };
 
 static void print_node(node_t *n, void *arg) {
   (void)arg;
-  printf("  %s [%s]\n", n->fp, n->fd != -1 ? "online" : "offline");
+  printf("%s  %s [%s]\n", n->name, n->fp, n->fd != -1 ? "online" : "offline");
 }
 
-static void find_node_fd(node_t *n, void *arg) {
+static void find_node_fd_by_fp(node_t *n, void *arg) {
   struct msg_args *a = (struct msg_args *)arg;
   if (!strcmp(n->fp, a->fp) && n->fd != -1)
     *a->found_fd = n->fd;
 }
 
+static void find_node_fd_by_name(node_t *n, void *arg) {
+  struct msg_args *a = (struct msg_args *)arg;
+  if (!strcmp(n->name, a->name) && n->fd != -1)
+    *a->found_fd = n->fd;
+}
+
 // CLI Commands
+//
 // Exit
 static CommandResult cmd_quit(int argc, char **argv) {
   (void)argc;
@@ -103,8 +110,10 @@ static CommandResult cmd_msg(int argc, char **argv) {
   }
 
   int found_fd = -1;
-  struct msg_args a = {argv[0], &found_fd};
-  node_each(find_node_fd, &a);
+  struct msg_args a = {argv[0], argv[0], &found_fd};
+  node_each(find_node_fd_by_name, &a);
+  if (found_fd == -1)
+    node_each(find_node_fd_by_fp, &a);
 
   if (found_fd == -1) {
     log_warn("Node not online: %s", argv[0]);
@@ -144,9 +153,9 @@ static void register_commands(void) {
 int daemon_run(void) {
   // ── Тестовые ноды (без сети) ──
   node_add("a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0c1d2e3f4a5b6c7d8e9f0a1b2",
-           10);
+           "alice", 10);
   node_add("b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0c1d2e3f4a5b6c7d8e9f0a1b2c3",
-           -1);
+           "bob", -1);
 
   log_info("Daemon starting");
   // SIGINT SIGTERM register handler
