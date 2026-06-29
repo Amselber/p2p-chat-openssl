@@ -2,6 +2,7 @@
 #include "daemon.h"
 #include "cli.h"
 #include "config.h"
+#include "discovery.h"
 #include "log.h"
 #include "node.h"
 #include <fcntl.h>
@@ -13,6 +14,7 @@
 
 static volatile int running = 1;
 static int epfd;
+static int udp_fd = -1;
 
 // Обработчик Ctrl+C
 static void on_signal(int s) {
@@ -132,15 +134,29 @@ static CommandResult cmd_msg(int argc, char **argv) {
   return result_success(NULL);
 }
 
+// Тестовые функции для discovery
+static CommandResult cmd_disc_send_hello(int argc, char **argv) {
+  (void)argc;
+  (void)argv;
+  discovery_send_hello(
+      udp_fd,
+      "a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0c1d2e3f4a5b6c7d8e9f0a1b2",
+      "alice", g_config.multicast_addr, g_config.multicast_port, 12345);
+
+  return result_success(NULL);
+}
+
 // Регистрация всех команд
 static void register_commands(void) {
-  static Command cmds[] = {{"quit", "Exit", cmd_quit},
-                           {"help", "Help", cmd_help},
-                           {"echo", "Echo", cmd_echo},
-                           {"config", "Config", cmd_config},
-                           {"msg", "Send message", cmd_msg},
-                           {"nodes", "List nodes", cmd_nodes},
-                           {NULL, NULL, NULL}};
+  static Command cmds[] = {
+      {"quit", "Exit", cmd_quit},
+      {"help", "Help", cmd_help},
+      {"echo", "Echo", cmd_echo},
+      {"config", "Config", cmd_config},
+      {"msg", "Send message", cmd_msg},
+      {"nodes", "List nodes", cmd_nodes},
+      {"_disc_hello", "Send UDP HELLO", cmd_disc_send_hello},
+      {NULL, NULL, NULL}};
 
   int i;
   for (i = 0; cmds[i].name; ++i)
@@ -175,6 +191,23 @@ int daemon_run(void) {
   // События epoll для наблюдения за fd
   // EPOLLIN пробуждение при появлении данных для чтения
   struct epoll_event ev = {.events = EPOLLIN};
+
+  // Инициализация discovery
+  udp_fd = discovery_init(g_config.multicast_addr, g_config.multicast_port);
+
+  if (udp_fd < 0) {
+    log_error("discovery_init failed");
+    close(epfd);
+    return 1;
+  }
+
+  ev.data.fd = udp_fd;
+  if (epoll_ctl(epfd, EPOLL_CTL_ADD, udp_fd, &ev) < 0) {
+    log_errno("epoll_ctl ADD udp");
+    close(udp_fd);
+    close(epfd);
+    return 1;
+  }
 
   // Неблокирующий stdin (не требуется нажатия enter)
   // Чтение флагов
