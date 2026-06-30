@@ -36,6 +36,7 @@ void test_init_ok(void) {
   setUp_discovery();
   TEST_ASSERT(g_fd >= 0);
   tearDown_discovery();
+  TEST_ASSERT(g_fd = -1);
 }
 
 // 2. Неправильный адрес — bind должен упасть
@@ -87,7 +88,8 @@ void test_send_recv(void) {
 
   char ip[64], fp[65], name[64];
   uint16_t port;
-  TEST_ASSERT_EQUAL(1, discovery_recv(g_fd, ip, fp, name, &port));
+  int res = discovery_recv(g_fd, ip, fp, name, &port);
+  TEST_ASSERT_EQUAL(1, res);
   TEST_ASSERT_EQUAL_STRING(FP, fp);
   TEST_ASSERT_EQUAL_STRING(NAME, name);
   TEST_ASSERT_EQUAL(54321, port);
@@ -97,40 +99,38 @@ void test_send_recv(void) {
 
 // 7. Парсинг без поля name
 void test_recv_no_name(void) {
-  char buf[256];
-  snprintf(buf, sizeof(buf), "{\"fp\":\"%s\",\"p\":12345}", FP);
+  setUp_discovery();
 
-  struct sockaddr_in a;
-  memset(&a, 0, sizeof(a));
-  a.sin_family = AF_INET;
-  a.sin_port = htons(9001);
-  a.sin_addr.s_addr = inet_addr("239.255.0.1");
-  sendto(g_fd, buf, strlen(buf), 0, (struct sockaddr *)&a, sizeof(a));
+  discovery_send_hello(g_fd, FP, "", ADDR, PORT, 12345);
   nanosleep(&ts, NULL);
 
   char ip[64], fp[65], name[64];
   uint16_t port;
-  TEST_ASSERT_EQUAL(1, discovery_recv(g_fd, ip, fp, name, &port));
+  int res = discovery_recv(g_fd, ip, fp, name, &port);
+  TEST_ASSERT_EQUAL(1, res);
   TEST_ASSERT_EQUAL_STRING(FP, fp);
   TEST_ASSERT_EQUAL(0, name[0]); // имя пустое
   TEST_ASSERT_EQUAL(12345, port);
+  tearDown_discovery();
 }
 
 // 8. Два сокета — отправка из одного, приём в другом
 void test_two_sockets(void) {
-  int b = discovery_init("239.255.0.1", 9004);
-  TEST_ASSERT(b >= 0);
+  int fd1 = discovery_init(ADDR, PORT);
+  int fd2 = discovery_init(ADDR, PORT);
 
-  discovery_send_hello(b, FP, NAME, ADDR, PORT, 9999);
+  discovery_send_hello(fd1, FP, NAME, ADDR, PORT, 12345);
   nanosleep(&ts, NULL);
 
   char ip[64], fp[65], name[64];
   uint16_t port;
-  TEST_ASSERT_EQUAL(1, discovery_recv(g_fd, ip, fp, name, &port));
+  int res = discovery_recv(fd2, ip, fp, name, &port);
+  TEST_ASSERT_EQUAL(1, res);
   TEST_ASSERT_EQUAL_STRING(FP, fp);
-  TEST_ASSERT_EQUAL(9999, port);
+  TEST_ASSERT_EQUAL(12345, port);
 
-  close(b);
+  close(fd1);
+  close(fd2);
 }
 
 int main_test_discovery(void) {
@@ -143,8 +143,8 @@ int main_test_discovery(void) {
   RUN_TEST(test_recv_garbage);
   RUN_TEST(test_recv_empty);
   RUN_TEST(test_send_recv);
-  // RUN_TEST(test_recv_no_name);
-  // RUN_TEST(test_two_sockets);
+  RUN_TEST(test_recv_no_name);
+  RUN_TEST(test_two_sockets);
 
   if (g_fd >= 0)
     close(g_fd);
