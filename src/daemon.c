@@ -7,6 +7,7 @@
 #include "node.h"
 #include <fcntl.h>
 #include <signal.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <string.h>
 #include <sys/epoll.h>
@@ -148,15 +149,14 @@ static CommandResult cmd_disc_send_hello(int argc, char **argv) {
 
 // Регистрация всех команд
 static void register_commands(void) {
-  static Command cmds[] = {
-      {"quit", "Exit", cmd_quit},
-      {"help", "Help", cmd_help},
-      {"echo", "Echo", cmd_echo},
-      {"config", "Config", cmd_config},
-      {"msg", "Send message", cmd_msg},
-      {"nodes", "List nodes", cmd_nodes},
-      {"_disc_hello", "Send UDP HELLO", cmd_disc_send_hello},
-      {NULL, NULL, NULL}};
+  static Command cmds[] = {{"quit", "Exit", cmd_quit},
+                           {"help", "Help", cmd_help},
+                           {"echo", "Echo", cmd_echo},
+                           {"config", "Config", cmd_config},
+                           {"msg", "Send message", cmd_msg},
+                           {"nodes", "List nodes", cmd_nodes},
+                           {"_hello", "Send UDP HELLO", cmd_disc_send_hello},
+                           {NULL, NULL, NULL}};
 
   int i;
   for (i = 0; cmds[i].name; ++i)
@@ -267,64 +267,87 @@ int daemon_run(void) {
       break;
     }
 
-    char c;
-    // Читаем stdin посимвольно. Неблокирующий — read вернёт 0 при EOF или -1
-    // если нет данных.
-    while (read(STDIN_FILENO, &c, 1) > 0) {
-      if (c == '\n') {
-        // Достигли конца строки — завершаем буфер.
-        buf[pos] = 0;
+    for (int i = 0; i < n; ++i) {
+      int fd = evs[i].data.fd;
 
-        if (pos > 0) {
-          log_debug("Input: '%s'", buf);
+      // ***** Обработка stdin *****
+      if (fd == STDIN_FILENO) {
+        char c;
+        // Читаем stdin посимвольно. Неблокирующий — read вернёт 0 при EOF или
+        // -1 если нет данных.
+        while (read(STDIN_FILENO, &c, 1) > 0) {
+          if (c == '\n') {
+            // Достигли конца строки — завершаем буфер.
+            buf[pos] = 0;
 
-          if (buf[0] == '/') {
-            char *av[16];
-            int ac = 1;
-            av[0] = "p2pchat";
+            if (pos > 0) {
+              log_debug("Input: '%s'", buf);
 
-            // Разбор строки
-            char *p = buf + 1;
-            while (*p) {
-              // Пропускаем пробелы перед аргументами
-              while (*p == ' ')
-                ++p;
-              if (!*p) // Конец строки
-                break;
-              av[ac++] = p; // Запоминаем начало аргумента
-              // Ищем конец аргемента (пробел или конец строки)
-              while (*p && *p != ' ')
-                ++p;
-              if (*p)
-                *p++ = 0; // Заменяем пробел на '\0'
+              if (buf[0] == '/') {
+                char *av[16];
+                int ac = 1;
+                av[0] = "p2pchat";
+
+                // Разбор строки
+                char *p = buf + 1;
+                while (*p) {
+                  // Пропускаем пробелы перед аргументами
+                  while (*p == ' ')
+                    ++p;
+                  if (!*p) // Конец строки
+                    break;
+                  av[ac++] = p; // Запоминаем начало аргумента
+                  // Ищем конец аргемента (пробел или конец строки)
+                  while (*p && *p != ' ')
+                    ++p;
+                  if (*p)
+                    *p++ = 0; // Заменяем пробел на '\0'
+                }
+                // Например: "/msg abc123 привет"
+                // После разбора:
+                //   buf = "/msg\0abc123\0привет"
+                //   av  = ["p2pchat", "msg", "abc123", "привет"]
+                //   ac  = 4
+
+                log_debug("Running command: %s (%d args)", av[1], ac - 1);
+                cli_run(ac, av); // Выполняем команду
+              } else {
+                printf("You typed: %s\n", buf);
+              }
             }
-            // Например: "/msg abc123 привет"
-            // После разбора:
-            //   buf = "/msg\0abc123\0привет"
-            //   av  = ["p2pchat", "msg", "abc123", "привет"]
-            //   ac  = 4
 
-            log_debug("Running command: %s (%d args)", av[1], ac - 1);
-            cli_run(ac, av); // Выполняем команду
-          } else {
-            printf("You typed: %s\n", buf);
+            // Сбрасываем буфер для следующей строки
+            pos = 0;
+            if (running) {
+              // Печатаем новое приглашение, если не вышли.
+              printf("> ");
+              fflush(stdout);
+            }
+          } else if (pos < (int)sizeof(buf) - 1) {
+            // Не конец строки и есть место в буфере — добавляем символ.
+            buf[pos++] = c;
           }
+          // Если буфер полон (pos == sizeof(buf)-1), символы молча
+          // отбрасываются.
         }
+        // если pos == sizeof(buf)-1, символы игнорируются
+      } // ***** UDP discovery *****
+      else if (fd == udp_fd) {
+        char ip[64], fp[65], name[64];
+        uint16_t port;
 
-        // Сбрасываем буфер для следующей строки
-        pos = 0;
-        if (running) {
-          // Печатаем новое приглашение, если не вышли.
-          printf("> ");
+        while (discovery_recv(fd, ip, fp, name, &port) == 1) {
+          // Игнорируем свои пакеты
+          if (!strcmp(fp, g_config.my_fp))
+            continue;
+
+          log_info("Discovered: %s (%s) @ %s:%u", name, fp, ip, port);
+          node_add(fp, name, -1);
+          printf("\r[%s discovered %s:%u]\n> ", name, ip, port);
           fflush(stdout);
         }
-      } else if (pos < (int)sizeof(buf) - 1) {
-        // Не конец строки и есть место в буфере — добавляем символ.
-        buf[pos++] = c;
       }
-      // Если буфер полон (pos == sizeof(buf)-1), символы молча отбрасываются.
     }
-    // если pos == sizeof(buf)-1, символы игнорируются
   }
 
   close(epfd);
