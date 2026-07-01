@@ -3,6 +3,7 @@
 #define CONFIG_H
 #include <stdint.h>
 
+// ! TODO: сделать g_config.my_name
 typedef struct {
   char multicast_addr[64];
   uint16_t multicast_port;
@@ -16,7 +17,8 @@ typedef struct {
   int log_to_console;
   char log_file[256];
 
-  char my_fp[65];
+  char my_fp[65]; // SHA256 fingerprint
+  char my_name[64];
 } config_t;
 
 extern config_t g_config;
