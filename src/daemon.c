@@ -11,11 +11,13 @@
 #include <stdio.h>
 #include <string.h>
 #include <sys/epoll.h>
+#include <time.h>
 #include <unistd.h>
 
 static volatile int running = 1;
 static int epfd;
 static int udp_fd = -1;
+static uint16_t tcp_port = 0;
 
 // Обработчик Ctrl+C
 static void on_signal(int s) {
@@ -141,8 +143,8 @@ static CommandResult cmd_disc_send_hello(int argc, char **argv) {
   (void)argv;
   discovery_send_hello(
       udp_fd,
-      "a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0c1d2e3f4a5b6c7d8e9f0a1b2",
-      "alice", g_config.multicast_addr, g_config.multicast_port, 12345);
+      "ffb2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0c1d2e3f4a5b6c7d8e9f0a1b2",
+      "jack", g_config.multicast_addr, g_config.multicast_port, 12345);
 
   return result_success(NULL);
 }
@@ -172,6 +174,9 @@ int daemon_run(void) {
            "alice", 10);
   node_add("b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0c1d2e3f4a5b6c7d8e9f0a1b2c3",
            "bob", -1);
+  strcpy(g_config.my_fp,
+         "c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0c1d2e3f4a5b6c7d8e9f0a1b2c3b2");
+  strcpy(g_config.my_name, "Johnny D");
 
   log_info("Daemon starting");
   // SIGINT SIGTERM register handler
@@ -238,6 +243,8 @@ int daemon_run(void) {
     return 1;
   }
 
+  // HELLO timer
+
   // evs — массив, куда epoll_wait запишет сработавшие события.
   // buf — буфер для накопления ввода до '\n'.
   // pos — текущая позиция записи в buf.
@@ -255,11 +262,18 @@ int daemon_run(void) {
   fflush(stdout);
 
   // main loop
+  time_t next_hello = time(NULL) + g_config.hello_interval;
   while (running) {
+    // HELLO Timeout - для пробуждения epoll_wait
+    int timeout_ms = (int)(next_hello - time(NULL)) * 1000;
+    if (timeout_ms < 0)
+      timeout_ms = 0;
+
     // epoll_wait блокируется до события или сигнала.
-    // evs — куда записать события, 1 — размер массива событий, -1 — ждать
-    // бесконечно. Возвращает количество готовых fd или -1 при ошибке.
-    int n = epoll_wait(epfd, evs, 1, -1);
+    // evs — куда записать события, 1 — размер массива событий
+    // timeout_ms - ожиданиие пробуждения
+    // Возвращает количество готовых fd или -1 при ошибке.
+    int n = epoll_wait(epfd, evs, 1, timeout_ms);
     if (n < 0) {
       if (errno == EINTR)
         continue;
@@ -347,6 +361,16 @@ int daemon_run(void) {
           fflush(stdout);
         }
       }
+    }
+
+    // Периодический HELLO
+    if (time(NULL) >= next_hello) {
+      discovery_send_hello(udp_fd, g_config.my_fp, g_config.my_name,
+                           g_config.multicast_addr, g_config.multicast_port,
+                           tcp_port);
+      next_hello = time(NULL) + g_config.hello_interval;
+      printf("> ");
+      fflush(stdout);
     }
   }
 
