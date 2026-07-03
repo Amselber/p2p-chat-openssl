@@ -36,6 +36,11 @@ int log_init(void) {
   return 0;
 }
 
+void log_init_debug(void) {
+  g_level = LOG_DEBUG;
+  g_console = 1;
+}
+
 void _log_write(log_level_t level, const char *file, int line, const char *func,
                 const char *fmt, ...) {
   if (level < g_level)
@@ -65,6 +70,7 @@ void _log_write(log_level_t level, const char *file, int line, const char *func,
 
   if (g_console)
     fprintf(level >= LOG_WARN ? stderr : stdout, "%s", linebuf);
+
   if (g_file) {
     fputs(linebuf, g_file);
     fflush(g_file);

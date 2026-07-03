@@ -6,13 +6,14 @@
 
 typedef enum {
   LOG_DEBUG,
-  LOG_INFO,
-  LOG_WARN,
+  LOG_FATAL,
   LOG_ERROR,
-  LOG_FATAL
+  LOG_WARN,
+  LOG_INFO
 } log_level_t;
 
 int log_init(void);
+void log_init_debug(void);
 
 #define log_debug(...)                                                         \
   _log_write(LOG_DEBUG, __FILE__, __LINE__, __func__, __VA_ARGS__)
