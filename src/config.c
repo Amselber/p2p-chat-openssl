@@ -1,5 +1,6 @@
 // src/config.c
 #include "config.h"
+#include "log.h"
 #include <ctype.h>
 #include <stddef.h>
 #include <stdio.h>
@@ -34,6 +35,7 @@ static char *trim(char *s) {
 
 // Настройки по умолчанию
 void config_set_defaults(void) {
+  log_info("load defaults");
   memset(&g_config, 0, sizeof(g_config));
   strcpy(g_config.multicast_addr, "239.255.0.1");
   g_config.multicast_port = 9000;
@@ -48,12 +50,17 @@ void config_set_defaults(void) {
 
 // Загрузка конфига
 int config_load(const char *path) {
+  log_init_debug();
+  log_info("load config");
   // Если файл не загрузится - то настройки по умолчанию
   config_set_defaults();
 
   FILE *f = fopen(path, "r");
-  if (!f)
+  if (!f) {
+    log_info("open file %s", path);
     return 0;
+  }
+  log_info("load: %s", path);
 
   char line[512], section[64] = "";
   while (fgets(line, sizeof(line), f)) {
@@ -120,6 +127,16 @@ int config_load(const char *path) {
         strcpy(g_config.log_file, v);
     }
   }
+
+  log_debug("multicast_addr: %s", g_config.multicast_addr);
+  log_debug("multicast_port: %u", g_config.multicast_port);
+  log_debug("hello_interval: %u", g_config.hello_interval);
+  log_debug("ca_cert: %s", g_config.ca_cert);
+  log_debug("my_cert: %s", g_config.my_cert);
+  log_debug("my_key: %s", g_config.my_key);
+  log_debug("log_level: %s", g_config.log_level);
+  log_debug("log_to_console: %u", g_config.log_to_console);
+  log_debug("log_file: %s", g_config.log_file);
 
   fclose(f);
   return 0;

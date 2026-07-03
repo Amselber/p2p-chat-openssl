@@ -16,12 +16,13 @@ int main(int argc, char **argv) {
     printf("Version: %s\n", VERSION_STRING);
   }
 
+  log_init_debug();
   config_load("p2pchat.ini");
   strcpy(g_config.log_level, "debug");
   g_config.log_to_console = 1;
   g_config.log_file[0] = '\0';
-  log_init();
 
+  log_init();
   log_info("==== P2P Chat starting ====");
   log_debug("Multicast: %s:%u", g_config.multicast_addr,
             g_config.multicast_port);
