@@ -6,10 +6,10 @@
 
 typedef enum {
   LOG_DEBUG,
-  LOG_FATAL,
-  LOG_ERROR,
+  LOG_INFO,
   LOG_WARN,
-  LOG_INFO
+  LOG_ERROR,
+  LOG_FATAL
 } log_level_t;
 
 int log_init(void);
