@@ -5,6 +5,7 @@
 #include "discovery.h"
 #include "log.h"
 #include "node.h"
+#include "transport.h"
 #include <fcntl.h>
 #include <signal.h>
 #include <stdint.h>
@@ -14,10 +15,10 @@
 #include <time.h>
 #include <unistd.h>
 
+#define MAX_EVENTS 16
+
 static volatile int running = 1;
 static int epfd;
-static int udp_fd = -1;
-static uint16_t tcp_port = 0;
 
 // Обработчик Ctrl+C
 static void on_signal(int s) {
@@ -50,8 +51,11 @@ static void find_node_fd_by_name(node_t *n, void *arg) {
     *a->found_fd = n->fd;
 }
 
-// CLI Commands
-//
+/*
+ * ================================================================
+ * ========================= Команды CLI ==========================
+ * ================================================================
+ */
 // Exit
 static CommandResult cmd_quit(int argc, char **argv) {
   (void)argc;
@@ -137,18 +141,6 @@ static CommandResult cmd_msg(int argc, char **argv) {
   return result_success(NULL);
 }
 
-// Тестовые функции для discovery
-static CommandResult cmd_disc_send_hello(int argc, char **argv) {
-  (void)argc;
-  (void)argv;
-  discovery_send_hello(
-      udp_fd,
-      "ffb2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0c1d2e3f4a5b6c7d8e9f0a1b2",
-      "jack", g_config.multicast_addr, g_config.multicast_port, 12345);
-
-  return result_success(NULL);
-}
-
 // Регистрация всех команд
 static void register_commands(void) {
   static Command cmds[] = {{"quit", "Exit", cmd_quit},
@@ -157,7 +149,6 @@ static void register_commands(void) {
                            {"config", "Config", cmd_config},
                            {"msg", "Send message", cmd_msg},
                            {"nodes", "List nodes", cmd_nodes},
-                           {"_hello", "Send UDP HELLO", cmd_disc_send_hello},
                            {NULL, NULL, NULL}};
 
   int i;
@@ -167,17 +158,49 @@ static void register_commands(void) {
   log_debug("Registered %d commands", i);
 }
 
-// Запуск демона
-int daemon_run(void) {
-  // ── Тестовые ноды (без сети) ──
-  node_add("a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0c1d2e3f4a5b6c7d8e9f0a1b2",
-           "alice", 10);
-  node_add("b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0c1d2e3f4a5b6c7d8e9f0a1b2c3",
-           "bob", -1);
-  strcpy(g_config.my_fp,
-         "c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0c1d2e3f4a5b6c7d8e9f0a1b2c3b2");
-  strcpy(g_config.my_name, "Johnny D");
+/*
+ * ================================================================
+ * ========================= Подключение к узлу ===================
+ * ================================================================
+ */
+static void try_connect(const char *fp, const char *name, const char *ip,
+                        uint16_t port, int epfd) {
+  // Уже подключены?
+  int found_fd = -1;
+  struct msg_args a = {fp, name, &found_fd};
+  node_each(find_node_fd_by_fp, &a);
+  if (found_fd != -1)
+    return; // подключены
 
+  // Подключаемся
+  int cfd = transport_connect(ip, port);
+  if (cfd < 0)
+    log_warn("can't estable connection");
+  return;
+
+  // Неблокирующий режим
+  int flags = fcntl(cfd, F_GETFL, 0);
+  if (flags >= 0)
+    fcntl(cfd, F_SETFL, flags | O_NONBLOCK);
+
+  // Добавляем в реестр
+  node_add(fp, name, cfd);
+
+  // Добавляем в epoll
+  struct epoll_event ev = {.events = EPOLLIN, .data.fd = cfd};
+  epoll_ctl(epfd, EPOLL_CTL_ADD, cfd, &ev);
+
+  log_info("Connected to %s (%s) @ %s:%u", name, fp, ip, port);
+  printf("\r[%s connected]\n> ", name);
+  fflush(stdout);
+}
+
+/*
+ * ================================================================
+ * ========================= DAEMON RUN ===========================
+ * ================================================================
+ */
+int daemon_run(void) {
   log_info("Daemon starting");
   // SIGINT SIGTERM register handler
   signal(SIGINT, on_signal);
@@ -198,7 +221,7 @@ int daemon_run(void) {
   struct epoll_event ev = {.events = EPOLLIN};
 
   // Инициализация discovery
-  udp_fd = discovery_init(g_config.multicast_addr, g_config.multicast_port);
+  int udp_fd = discovery_init(g_config.multicast_addr, g_config.multicast_port);
 
   if (udp_fd < 0) {
     log_error("discovery_init failed");
@@ -209,6 +232,25 @@ int daemon_run(void) {
   ev.data.fd = udp_fd;
   if (epoll_ctl(epfd, EPOLL_CTL_ADD, udp_fd, &ev) < 0) {
     log_errno("epoll_ctl ADD udp");
+    close(udp_fd);
+    close(epfd);
+    return 1;
+  }
+
+  // TCP listen
+  uint16_t tcp_port = 0; // OS select tcp-port
+  int tcp_fd = transport_listen(&tcp_port);
+  if (tcp_fd < 0) {
+    log_error("transport_listen failed");
+    close(udp_fd);
+    close(epfd);
+    return 1;
+  }
+
+  ev.data.fd = tcp_fd;
+  if (epoll_ctl(epfd, EPOLL_CTL_ADD, tcp_fd, &ev) < 0) {
+    log_errno("epoll_ctl ADD tcp");
+    close(tcp_fd);
     close(udp_fd);
     close(epfd);
     return 1;
@@ -248,7 +290,7 @@ int daemon_run(void) {
   // evs — массив, куда epoll_wait запишет сработавшие события.
   // buf — буфер для накопления ввода до '\n'.
   // pos — текущая позиция записи в buf.
-  struct epoll_event evs[1];
+  struct epoll_event evs[MAX_EVENTS];
   char buf[256];
   int pos = 0;
 
@@ -273,7 +315,7 @@ int daemon_run(void) {
     // evs — куда записать события, 1 — размер массива событий
     // timeout_ms - ожиданиие пробуждения
     // Возвращает количество готовых fd или -1 при ошибке.
-    int n = epoll_wait(epfd, evs, 1, timeout_ms);
+    int n = epoll_wait(epfd, evs, MAX_EVENTS, timeout_ms);
     if (n < 0) {
       if (errno == EINTR)
         continue;
@@ -329,7 +371,6 @@ int daemon_run(void) {
                 printf("You typed: %s\n", buf);
               }
             }
-
             // Сбрасываем буфер для следующей строки
             pos = 0;
             if (running) {
@@ -356,8 +397,49 @@ int daemon_run(void) {
             continue;
 
           log_info("Discovered: %s (%s) @ %s:%u", name, fp, ip, port);
-          node_add(fp, name, -1);
+
           printf("\r[%s discovered %s:%u]\n> ", name, ip, port);
+          fflush(stdout);
+
+          try_connect(fp, name, ip, port, epfd);
+        }
+      } // ***** TCP incomming *****
+      else if (fd == tcp_fd) {
+        int cfd = transport_accept(fd);
+        if (cfd < 0)
+          continue;
+
+        // Неблокирующий режим
+        int cflags = fcntl(cfd, F_GETFL, 0);
+        if (cflags >= 0)
+          fcntl(cfd, F_SETFL, cflags | O_NONBLOCK);
+
+        ev.data.fd = cfd;
+        epoll_ctl(epfd, EPOLL_CTL_ADD, cfd, &ev);
+        log_info("TCP accepted, fd=%d", cfd);
+        printf("\r[incomming connection accepted]\n> ");
+        fflush(stdout);
+      } // Обарботка данных пира
+      else {
+        // Проверяем открыто ли соединение
+        if (evs[i].events & (EPOLLHUP | EPOLLRDHUP)) {
+          node_t *n = node_find_by_fd(fd);
+          if (n) {
+            log_info("Disconnected: %s", n->name);
+            printf("\r[%s disconnected]\n> ", n->name);
+            n->fd = -1;
+          }
+          epoll_ctl(epfd, EPOLL_CTL_ADD, fd, NULL);
+          transport_close(fd);
+          fflush(stdout);
+          continue;
+        }
+
+        // Читаем данные
+        const char *text = transport_recv(fd);
+        if (text) {
+          node_t *n = node_find_by_fd(fd);
+          printf("\r[%s]: %s\n ", n ? n->name : "???", text);
           fflush(stdout);
         }
       }
@@ -374,6 +456,9 @@ int daemon_run(void) {
     }
   }
 
+  // Завершение
+  close(udp_fd);
+  close(tcp_fd);
   close(epfd);
   log_info("Daemon stopped");
   return 0;
