@@ -1,5 +1,4 @@
 // src/main.c
-#include "cli.h"
 #include "config.h"
 #include "daemon.h"
 #include "log.h"
@@ -8,16 +7,21 @@
 #include <string.h>
 
 int main(int argc, char **argv) {
-  if (argc > 1 && !strcmp(argv[1], "help")) {
-    cli_show_help();
-    return 0;
-  }
-  if (argc > 1 && !strcmp(argv[1], "version")) {
-    printf("Version: %s\n", VERSION_STRING);
+  const char *config_path = "p2pchat.ini";
+
+  for (int i = 1; i < argc; ++i) {
+    if (!strcmp(argv[i], "-c") && i + 1 < argc)
+      config_path = argv[++i];
+    else if (!strcmp(argv[i], "help")) {
+      printf("Usage: p2pchat [-c <config>] [help|version]\n");
+      return 0;
+    } else if (!strcmp(argv[i], "version")) {
+      printf("Version: %s\n", VERSION_STRING);
+      return 0;
+    }
   }
 
-  log_init_debug();
-  config_load("p2pchat.ini");
+  config_load(config_path);
   strcpy(g_config.log_level, "debug");
   g_config.log_to_console = 1;
   g_config.log_file[0] = '\0';
