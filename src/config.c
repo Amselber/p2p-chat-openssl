@@ -35,7 +35,6 @@ static char *trim(char *s) {
 
 // Настройки по умолчанию
 void config_set_defaults(void) {
-  log_info("load defaults");
   memset(&g_config, 0, sizeof(g_config));
   strcpy(g_config.multicast_addr, "239.255.0.1");
   g_config.multicast_port = 9000;
@@ -50,14 +49,12 @@ void config_set_defaults(void) {
 
 // Загрузка конфига
 int config_load(const char *path) {
-  log_init_debug();
-  log_info("load config");
   // Если файл не загрузится - то настройки по умолчанию
   config_set_defaults();
 
   FILE *f = fopen(path, "r");
   if (!f) {
-    log_info("open file %s", path);
+    log_warn("Error openning file %s. Set defaults", path);
     return 0;
   }
   log_info("load: %s", path);
