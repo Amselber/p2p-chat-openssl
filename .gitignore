@@ -60,3 +60,9 @@ bin/
 *.log
 .vscode/
 compile_commands.json
+
+# certs
+certs/*.crt
+certs/*.key
+certs/*.csr
+certs/*.srl
