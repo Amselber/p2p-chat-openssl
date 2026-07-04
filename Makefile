@@ -20,7 +20,7 @@
 CC = gcc
 CFLAGS = -Wall -Wextra -Wpedantic -Werror -Wformat=2 -Wsign-conversion \
 				 -Wcast-align -std=c11 -g
-LDFLAGS =
+LDFLAGS = -lssl -lcrypto
 
 # -----------------------------------------------------------------------------
 # Пути к фреймворку Unity (для модульного тестирования)
