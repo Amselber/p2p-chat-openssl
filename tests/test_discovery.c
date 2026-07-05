@@ -1,4 +1,4 @@
-// test_discovery.c
+// tests/test_discovery.c
 #define _POSIX_C_SOURCE 199309L
 
 #include "discovery.h"
