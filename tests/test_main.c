@@ -5,6 +5,7 @@ extern int main_test_config(void);
 extern int main_test_log(void);
 extern int main_test_node(void);
 extern int main_test_discovery(void);
+extern int main_test_transport(void);
 
 extern void setUp_log(void);
 extern void setUp_node(void);
@@ -32,6 +33,7 @@ int main(void) {
   failures += main_test_log();
   failures += main_test_node();
   failures += main_test_discovery();
+  failures += main_test_transport();
 
   return failures > 0 ? 1 : 0;
 }
