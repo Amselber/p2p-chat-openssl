@@ -168,8 +168,9 @@ void discovery_send_hello(int fd, const char *fp, const char *name,
   if (sent < 0) {
     log_errno("discovery: sendto failed");
   } else {
-    log_debug("HELLO sent: %zd bytes to %s:%u (fp=%s, name=%s, tcp=%u)", sent,
-              mcast_addr, mcast_port, fp, name, tcp_port);
+    // log_debug("HELLO sent: %zd bytes to %s:%u (fp=%s, name=%s, tcp=%u)",
+    // sent,
+    //           mcast_addr, mcast_port, fp, name, tcp_port);
   }
 }
 
