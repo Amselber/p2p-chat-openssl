@@ -3,7 +3,6 @@
 #define CONFIG_H
 #include <stdint.h>
 
-// ! TODO: сделать g_config.my_name
 typedef struct {
   char multicast_addr[64];
   uint16_t multicast_port;
