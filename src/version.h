@@ -3,8 +3,8 @@
 #define VERSION_H
 
 #define VERSION_MAJOR 0
-#define VERSION_MINOR 5
-#define VERSION_PATCH 0
+#define VERSION_MINOR 7
+#define VERSION_PATCH 1
 
 // Макрос-строка, чтобы не дёргать три числа по отдельности
 #define STR_HELPER(x) #x
