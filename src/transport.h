@@ -170,6 +170,15 @@ int transport_tls_accept(int plain_fd);
  */
 int transport_tls_connect(int plain_fd);
 
+/*
+ * @brief transport_tls_pending — проверяет, ожидает ли fd TLS-рукопожатия.
+ *
+ * @param fd Файловый дескриптор TCP-соединения
+ * @return 0 если TLS уже установлен. 1 если fd ещё не прошёл TLS (можно
+ * вызывать tls_accept/connect).
+ */
+int transport_tls_pending(int fd);
+
 /**
  * @brief Закрыть TLS-соединение
  *

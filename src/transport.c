@@ -3,6 +3,7 @@
 #include "config.h"
 #include "log.h"
 #include <arpa/inet.h>
+#include <fcntl.h>
 #include <openssl/err.h>
 #include <openssl/sha.h>
 #include <openssl/ssl.h>
@@ -152,8 +153,8 @@ int transport_tls_init(const char *ca_path, const char *cert_path,
   SSL_load_error_strings(); // загружает тексты ошибок для логов
 
   // 2: создание контекста
-  // TLS_server_method() работает и для сервера, и для клиента
-  g_ctx = SSL_CTX_new(TLS_server_method());
+  // TLS_method() работает и для сервера, и для клиента
+  g_ctx = SSL_CTX_new(TLS_method());
   if (!g_ctx) {
     log_error("SSL_CTX_new failed");
     return -1;
@@ -365,6 +366,7 @@ int transport_connect(const char *ip, uint16_t port) {
     close(fd);
     return -1;
   }
+  log_debug("connect OK: %s:%u, fd=%d", ip, port, fd);
 
   return fd;
 }
@@ -397,24 +399,37 @@ void transport_close(int fd) {
  * После успешного рукопожатия все данные шифруются.
  */
 int transport_tls_accept(int plain_fd) {
-  SSL *ssl = SSL_new(g_ctx); // создаём SSL-объект из контекста
-  if (!ssl)
-    return -1;
+  SSL *ssl = ssl_get(plain_fd); // создаём SSL-объект из контекста
+  if (!ssl) {
+    ssl = SSL_new(g_ctx);
+    if (!ssl)
+      return -1;
+    SSL_set_fd(ssl, plain_fd);
+    ssl_set(plain_fd, ssl);
+  }
 
-  SSL_set_fd(ssl, plain_fd); // привязываем к файловому дескриптору
+  int ret = SSL_accept(ssl);
 
-  if (SSL_accept(ssl) != 1) { // выполняем рукопожатие
-    unsigned long err = ERR_get_error();
-    char errbuf[256];
-    ERR_error_string_n(err, errbuf, sizeof(errbuf));
-    log_warn("SSL_accept failed: %s", errbuf);
-    SSL_free(ssl);
+  if (ret == 1) {
+    // Рукопожатие завершено
+    log_debug("TLS accepted, fd=%d", plain_fd);
+    return 0;
+  }
+
+  int err = SSL_get_error(ssl, ret);
+
+  if (err == SSL_ERROR_WANT_READ || err == SSL_ERROR_WANT_WRITE) {
+    // Рукопожатие ещё не завершено — нужно подождать
+    // Устанавливаем errno для вызывающего кода
+    errno = EAGAIN;
     return -1;
   }
 
-  ssl_set(plain_fd, ssl); // сохраняем в маппинг
-  log_debug("TLS accepted, fd=%d", plain_fd);
-  return 0;
+  char errbuf[256];
+  ERR_error_string_n(ERR_get_error(), errbuf, sizeof(errbuf));
+  log_warn("SSL_accept failed: %s", errbuf);
+  SSL_free(ssl);
+  return -1;
 }
 
 /*
@@ -423,24 +438,69 @@ int transport_tls_accept(int plain_fd) {
  * Вызывается после transport_connect().
  */
 int transport_tls_connect(int plain_fd) {
-  SSL *ssl = SSL_new(g_ctx);
-  if (!ssl)
-    return -1;
+  log_debug("=== TLS connect START fd=%d ===", plain_fd);
+  log_debug("fd=%d valid? %s", plain_fd,
+            fcntl(plain_fd, F_GETFL) >= 0 ? "yes" : "no");
 
-  SSL_set_fd(ssl, plain_fd);
+  SSL *ssl = ssl_get(plain_fd);
+  log_debug("ssl_get(%d) = %s", plain_fd, ssl ? "EXISTS" : "NULL");
 
-  if (SSL_connect(ssl) != 1) {
-    unsigned long err = ERR_get_error();
-    char errbuf[256];
-    ERR_error_string_n(err, errbuf, sizeof(errbuf));
-    log_warn("SSL_connect failed: %s", errbuf);
-    SSL_free(ssl);
+  if (!ssl) {
+    ssl = SSL_new(g_ctx);
+    if (!ssl) {
+      log_error("SSL_new failed");
+      return -1;
+    }
+    SSL_set_fd(ssl, plain_fd);
+    ssl_set(plain_fd, ssl);
+    log_debug("SSL created and set for fd=%d", plain_fd);
+  }
+
+  if (SSL_is_init_finished(ssl)) {
+    log_debug("TLS already finished for fd=%d", plain_fd);
+    return 0;
+  }
+
+  log_debug("Calling SSL_connect(%d)...", plain_fd);
+  ERR_clear_error();
+  int ret = SSL_connect(ssl);
+  int err = SSL_get_error(ssl, ret);
+  unsigned long ossl_err = ERR_get_error();
+
+  char errbuf[256] = {0};
+  if (ossl_err)
+    ERR_error_string_n(ossl_err, errbuf, sizeof(errbuf));
+
+  log_debug("SSL_connect ret=%d, SSL_get_error=%d, ERR=%s, finished=%d", ret,
+            err, ossl_err ? errbuf : "none", SSL_is_init_finished(ssl));
+
+  if (ret == 1) {
+    log_debug("TLS connect SUCCESS fd=%d", plain_fd);
+    return 0;
+  }
+
+  if (err == SSL_ERROR_WANT_READ || err == SSL_ERROR_WANT_WRITE) {
+    log_debug("TLS connect IN PROGRESS fd=%d", plain_fd);
+    errno = EAGAIN;
     return -1;
   }
 
-  ssl_set(plain_fd, ssl);
-  log_debug("TLS connected, fd=%d", plain_fd);
-  return 0;
+  log_warn("TLS connect FAILED fd=%d: %s", plain_fd,
+           ossl_err ? errbuf : "unknown");
+
+  SSL_free(ssl);
+  ssl_del(plain_fd);
+  return -1;
+}
+
+// проверяет, ожидает ли fd TLS-рукопожатия.
+int transport_tls_pending(int fd) {
+  // Если SSL* нет — TLS ещё не начинали
+  // Если SSL* есть и SSL_is_init_finished — TLS завершён
+  SSL *ssl = ssl_get(fd);
+  if (!ssl)
+    return 1;                        // TLS не начинали
+  return !SSL_is_init_finished(ssl); // 1 = ещё в процессе, 0 = готов
 }
 
 /*
@@ -520,6 +580,13 @@ const char *transport_peer_name(int fd) {
  */
 int transport_send(int fd, const char *text) {
   SSL *ssl = ssl_get(fd);
+
+  // Если SSL есть, но рукопожатие не завершено — не отправляем
+  if (ssl && !SSL_is_init_finished(ssl)) {
+    log_warn("TLS not ready for fd=%d", fd);
+    return -1;
+  }
+
   size_t len = strlen(text);
   size_t sent = 0;
 
