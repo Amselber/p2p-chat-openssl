@@ -40,7 +40,7 @@ static volatile int running = 1;
 static int epfd;
 static int udp_fd;
 static int tcp_fd;
-static uint16_t tcp_port;
+static uint16_t tcp_port = 0; // 0 - OS Selected
 
 /* ─── Обработчик сигналов ─── */
 
@@ -110,6 +110,65 @@ static void find_node_by_name(node_t *n, void *arg) {
     *a->found_fd = n->fd;
 }
 
+/*
+ * do_tls_handshake — выполняет TLS-рукопожатие для одного узла.
+ * Вызывается из команды /tls и из /tls_all.
+ */
+static void do_tls_handshake(int fd) {
+  if (fd == -1)
+    return; // офлайн
+  if (!transport_tls_pending(fd))
+    return; // TLS уже готов
+
+  int rc = transport_tls_connect(fd);
+
+  if (rc == 0) {
+    const char *peer_fp = transport_peer_fingerprint(fd);
+    const char *peer_name = transport_peer_name(fd);
+
+    if (peer_fp) {
+      log_info("TLS established with %s (%s), fd=%d",
+               peer_name ? peer_name : "?", peer_fp, fd);
+      printf("[TLS] %s verified\n", peer_name ? peer_name : peer_fp);
+    }
+    return;
+  }
+
+  if (errno == EAGAIN) {
+    printf("[TLS] : handshake in progress...\n");
+    return;
+  }
+
+  printf("[TLS] : handshake failed\n");
+}
+
+static void accept_tls_handshake(int fd) {
+  if (fd == -1)
+    return; // офлайн
+  if (!transport_tls_pending(fd))
+    return; // TLS уже готов
+
+  int rc = transport_tls_accept(fd);
+
+  if (rc == 0) {
+    const char *peer_fp = transport_peer_fingerprint(fd);
+    const char *peer_name = transport_peer_name(fd);
+
+    if (peer_fp) {
+      log_info("TLS established with %s (%s), fd=%d",
+               peer_name ? peer_name : "?", peer_fp, fd);
+      printf("[TLS] %s verified\n", peer_name ? peer_name : peer_fp);
+    }
+    return;
+  }
+
+  if (errno == EAGAIN) {
+    printf("[TLS] : handshake in progress...\n");
+    return;
+  }
+
+  printf("[TLS] : handshake failed\n");
+}
 /*
  * ================================================================
  * ========================= Команды CLI ==========================
@@ -236,6 +295,54 @@ static CommandResult cmd_msg(int argc, char **argv) {
   return result_success(NULL);
 }
 
+static CommandResult cmd_send_hello(int argc, char **argv) {
+  (void)argc;
+  (void)argv;
+  discovery_send_hello(udp_fd, g_config.my_fp, g_config.my_name,
+                       g_config.multicast_addr, g_config.multicast_port,
+                       tcp_port);
+  return result_success(NULL);
+}
+
+/*
+ * /tls <name-or-fp>
+ * Запускает TLS-рукопожатие с указанным узлом.
+ */
+static CommandResult cmd_tls(int argc, char **argv) {
+  if (argc < 1) {
+    log_warn("/_tls called with insufficient arguments");
+    return result_error("Usage: /_tls <name-or-fp>");
+  }
+
+  // Ищем узел
+  int found_fd = -1;
+  struct find_args a = {argv[0], argv[0], &found_fd};
+
+  node_each(find_node_by_name, &a);
+  if (found_fd == -1)
+    node_each(find_node_by_fp, &a);
+
+  if (found_fd == -1) {
+    log_warn("Node not online: %s", argv[0]);
+    return result_error("Node not online");
+  }
+
+  if (!found_fd || found_fd == -1)
+    return result_error("Node not online");
+
+  if (!transport_tls_pending(found_fd))
+    return result_success("TLS already established");
+
+  do_tls_handshake(found_fd);
+
+  if (!transport_tls_pending(found_fd))
+    return result_success("TLS established");
+  else if (errno == EAGAIN)
+    return result_success("TLS handshake in progress");
+  else
+    return result_error("TLS handshake failed");
+}
+
 // Регистрация всех команд
 static void register_commands(void) {
   static Command cmds[] = {{"quit", "Exit", cmd_quit},
@@ -244,6 +351,8 @@ static void register_commands(void) {
                            {"config", "Show configuration", cmd_config},
                            {"msg", "Send private message", cmd_msg},
                            {"nodes", "List connected nodes", cmd_nodes},
+                           {"_hello", "Discovery send HELLO", cmd_send_hello},
+                           {"_tls", "TLS handshake with node", cmd_tls},
                            {NULL, NULL, NULL}};
 
   int i;
@@ -278,56 +387,45 @@ static void try_connect(const char *fp, const char *name, const char *ip,
   int found_fd = -1;
   struct find_args a = {fp, name, &found_fd};
   node_each(find_node_by_fp, &a);
+  if (found_fd == -1) {
+    // Ищем по имени
+    node_each(find_node_by_name, &a);
+  }
   if (found_fd != -1) {
-    log_debug("Already connected to %s", name);
+    log_debug("Already connected to %s (fd=%d)", name, found_fd);
     return; // подключены
   }
 
-  // 2: 2: Подключаемся по TCP
+  // Правило: меньший fp не подулючается к большему
+  // (ждёт входящее от него)
+  if (strcmp(g_config.my_fp, fp) > 0) {
+    log_debug("I'm senior to %s, waiting for incoming", name);
+    return;
+  }
+  log_debug("I'm junior to %s, connecting", name);
+
+  // 2: Подключаемся по TCP
   int cfd = transport_connect(ip, port);
   if (cfd < 0) {
     log_warn("TCP connect failed to %s @ %s:%u", name, ip, port);
     return;
   }
+  log_info("TCP accepted: %u, port: %u", cfd, tcp_port);
 
-  // 3: TLS-рукопожатие
-  if (transport_tls_connect(cfd) != 0) {
-    log_warn("TLS connect failed to %s", name);
-    transport_close(cfd);
-    return;
-  }
-
-  // 4: Сверка fingerprint из HELLO с сертификатом
-  // HELLO утверждает: "я alice, fp=abc123"
-  // Сертификат должен иметь тот же fp=abc123
-  const char *cert_fp = transport_peer_fingerprint(cfd);
-  if (!cert_fp || strcmp(cert_fp, fp) != 0) {
-    log_warn("Fingerprint mismatch for %s: "
-             "HELLO=%s cert=%s",
-             name, fp, cert_fp ? cert_fp : "NULL");
-    transport_tls_close(cfd);
-    transport_close(cfd);
-    return;
-  }
-
-  // 5: получаем имя из сертификата (CN)
-  const char *cert_name = transport_peer_name(cfd);
-
-  // 6: Неблокирующий режим
+  // 3: Неблокирующий режим
   int flags = fcntl(cfd, F_GETFL, 0);
   if (flags >= 0)
     fcntl(cfd, F_SETFL, flags | O_NONBLOCK);
 
-  // 7: Добавляем узел в реестр
-  node_add(fp, cert_name ? cert_name : name, cfd);
+  // 4: Добавляем узел в реестр
+  node_add(fp, name, cfd);
 
-  // 8: Добавляем fd в epoll
+  // 5: Добавляем fd в epoll
   struct epoll_event ev = {.events = EPOLLIN, .data.fd = cfd};
   epoll_ctl(epfd, EPOLL_CTL_ADD, cfd, &ev);
 
-  log_info("Connected to %s (%s) @ %s:%u fd=%d", cert_name ? cert_name : name,
-           fp, ip, port, cfd);
-  printf("\r[%s connected]\n> ", cert_name ? cert_name : name);
+  log_info("TCP connected to %s (%s) @ %s:%u, fd=%d", name, fp, ip, port, cfd);
+  printf("\r[%s connected]\n> ", name);
   fflush(stdout);
 }
 
@@ -347,40 +445,19 @@ static void handle_incoming(int tcp_fd) {
   if (cfd < 0)
     return;
 
-  // 2: TLS-рукопожатие
-  if (transport_tls_accept(cfd) != 0) {
-    log_warn("TLS accept failed, fd=%d", cfd);
-    transport_close(cfd);
-    return;
-  }
-
-  // 3: получаем fingerprint и имя из сертификата пира
-  const char *peer_fp = transport_peer_fingerprint(cfd);
-  const char *peer_name = transport_peer_name(cfd);
-
-  if (!peer_fp) {
-    log_warn("No certificate from incoming peer, fd=%d", cfd);
-    transport_tls_close(cfd);
-    transport_close(cfd);
-    return;
-  }
-
-  // 4: неблокирующий режим
+  // 2: неблокирующий режим
   int flags = fcntl(cfd, F_GETFL, 0);
   if (flags >= 0)
     fcntl(cfd, F_SETFL, flags | O_NONBLOCK);
 
-  // 5: добавляем узел
-  node_add(peer_fp, peer_name ? peer_name : "incoming", cfd);
+  // 3: добавляем узел
+  node_add("", "incoming", cfd);
 
   // 6: добавляем в epoll
   struct epoll_event ev = {.events = EPOLLIN, .data.fd = cfd};
   epoll_ctl(epfd, EPOLL_CTL_ADD, cfd, &ev);
 
-  log_info("Accepted connection from %s (%s), fd=%d",
-           peer_name ? peer_name : "?", peer_fp, cfd);
-  printf("\r[%s connected]\n> ", peer_name ? peer_name : "incoming");
-  fflush(stdout);
+  log_info("TCP accepted, fd=%d", cfd);
 }
 
 /*
@@ -402,6 +479,12 @@ static void handle_peer_data(int fd, uint32_t events) {
     transport_tls_close(fd);
     transport_close(fd);
     fflush(stdout);
+    return;
+  }
+
+  // ── TLS ещё не установлен? ──
+  if (transport_tls_pending(fd)) {
+    accept_tls_handshake(fd);
     return;
   }
 
@@ -559,7 +642,6 @@ int daemon_run(void) {
   }
 
   // ——— TCP listen ———
-  tcp_port = 0; // OS select tcp-port
   tcp_fd = transport_listen(&tcp_port);
   if (tcp_fd < 0) {
     log_error("transport_listen failed");
@@ -616,9 +698,9 @@ int daemon_run(void) {
 
   // ——— Первый HELLO ———
 
-  discovery_send_hello(udp_fd, g_config.my_fp, g_config.my_name,
-                       g_config.multicast_addr, g_config.multicast_port,
-                       tcp_port);
+  // discovery_send_hello(udp_fd, g_config.my_fp, g_config.my_name,
+  //                      g_config.multicast_addr, g_config.multicast_port,
+  //                      tcp_port);
 
   // HELLO timer
   // evs — массив, куда epoll_wait запишет сработавшие события.
@@ -673,9 +755,9 @@ int daemon_run(void) {
 
     // Периодический HELLO
     if (time(NULL) >= next_hello) {
-      discovery_send_hello(udp_fd, g_config.my_fp, g_config.my_name,
-                           g_config.multicast_addr, g_config.multicast_port,
-                           tcp_port);
+      // discovery_send_hello(udp_fd, g_config.my_fp, g_config.my_name,
+      //                      g_config.multicast_addr, g_config.multicast_port,
+      //                      tcp_port);
       next_hello = time(NULL) + g_config.hello_interval;
       // printf("> ");
       // fflush(stdout);
