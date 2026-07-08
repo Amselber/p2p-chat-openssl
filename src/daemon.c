@@ -73,7 +73,7 @@ struct find_args {
  */
 static void print_node(node_t *n, void *arg) {
   (void)arg;
-  printf("  %-20s  %s [%s]\n", n->name, n->fp,
+  printf("  %-10s : %u : %s [%s]\n", n->name, n->is_incoming, n->fp,
          n->fd != -1 ? "online" : "offline");
 }
 
@@ -114,13 +114,21 @@ static void find_node_by_name(node_t *n, void *arg) {
  * do_tls_handshake — выполняет TLS-рукопожатие для одного узла.
  * Вызывается из команды /tls и из /tls_all.
  */
-static void do_tls_handshake(int fd) {
-  if (fd == -1)
+static void do_tls_handshake(int fd, int is_incoming) {
+  // Отсутствует TCP-соединение с узлом
+  if (!fd || fd == -1)
     return; // офлайн
-  if (!transport_tls_pending(fd))
-    return; // TLS уже готов
 
-  int rc = transport_tls_connect(fd);
+  // Ожидаем TLS-рукопожатие?
+  if (!transport_tls_pending(fd))
+    return;
+
+  int rc = -1;
+  if (!is_incoming) {
+    rc = transport_tls_connect(fd);
+  } else {
+    rc = transport_tls_accept(fd);
+  }
 
   if (rc == 0) {
     const char *peer_fp = transport_peer_fingerprint(fd);
@@ -129,6 +137,7 @@ static void do_tls_handshake(int fd) {
     if (peer_fp) {
       log_info("TLS established with %s (%s), fd=%d",
                peer_name ? peer_name : "?", peer_fp, fd);
+      node_add(peer_fp, peer_name ? peer_name : "?", fd, is_incoming);
       printf("[TLS] %s verified\n", peer_name ? peer_name : peer_fp);
     }
     return;
@@ -142,33 +151,6 @@ static void do_tls_handshake(int fd) {
   printf("[TLS] : handshake failed\n");
 }
 
-static void accept_tls_handshake(int fd) {
-  if (fd == -1)
-    return; // офлайн
-  if (!transport_tls_pending(fd))
-    return; // TLS уже готов
-
-  int rc = transport_tls_accept(fd);
-
-  if (rc == 0) {
-    const char *peer_fp = transport_peer_fingerprint(fd);
-    const char *peer_name = transport_peer_name(fd);
-
-    if (peer_fp) {
-      log_info("TLS established with %s (%s), fd=%d",
-               peer_name ? peer_name : "?", peer_fp, fd);
-      printf("[TLS] %s verified\n", peer_name ? peer_name : peer_fp);
-    }
-    return;
-  }
-
-  if (errno == EAGAIN) {
-    printf("[TLS] : handshake in progress...\n");
-    return;
-  }
-
-  printf("[TLS] : handshake failed\n");
-}
 /*
  * ================================================================
  * ========================= Команды CLI ==========================
@@ -301,6 +283,7 @@ static CommandResult cmd_send_hello(int argc, char **argv) {
   discovery_send_hello(udp_fd, g_config.my_fp, g_config.my_name,
                        g_config.multicast_addr, g_config.multicast_port,
                        tcp_port);
+
   return result_success(NULL);
 }
 
@@ -309,9 +292,9 @@ static CommandResult cmd_send_hello(int argc, char **argv) {
  * Запускает TLS-рукопожатие с указанным узлом.
  */
 static CommandResult cmd_tls(int argc, char **argv) {
-  if (argc < 1) {
+  if (argc < 2) {
     log_warn("/_tls called with insufficient arguments");
-    return result_error("Usage: /_tls <name-or-fp>");
+    return result_error("Usage: /_tls <name-or-fp> <is_incoming>[1, 0]");
   }
 
   // Ищем узел
@@ -333,7 +316,8 @@ static CommandResult cmd_tls(int argc, char **argv) {
   if (!transport_tls_pending(found_fd))
     return result_success("TLS already established");
 
-  do_tls_handshake(found_fd);
+  printf("tls argv: %s %s %s", argv[0], argv[1], argv[2]);
+  do_tls_handshake(found_fd, 0);
 
   if (!transport_tls_pending(found_fd))
     return result_success("TLS established");
@@ -381,53 +365,44 @@ static void register_commands(void) {
  *
  * Если любая проверка не проходит — соединение закрывается.
  */
-static void try_connect(const char *fp, const char *name, const char *ip,
-                        uint16_t port, int epfd) {
-  // 1: Уже подключены?
-  int found_fd = -1;
-  struct find_args a = {fp, name, &found_fd};
-  node_each(find_node_by_fp, &a);
-  if (found_fd == -1) {
-    // Ищем по имени
-    node_each(find_node_by_name, &a);
-  }
-  if (found_fd != -1) {
-    log_debug("Already connected to %s (fd=%d)", name, found_fd);
-    return; // подключены
-  }
-
-  // Правило: меньший fp не подулючается к большему
-  // (ждёт входящее от него)
-  if (strcmp(g_config.my_fp, fp) > 0) {
-    log_debug("I'm senior to %s, waiting for incoming", name);
-    return;
-  }
-  log_debug("I'm junior to %s, connecting", name);
-
-  // 2: Подключаемся по TCP
-  int cfd = transport_connect(ip, port);
-  if (cfd < 0) {
-    log_warn("TCP connect failed to %s @ %s:%u", name, ip, port);
-    return;
-  }
-  log_info("TCP accepted: %u, port: %u", cfd, tcp_port);
-
-  // 3: Неблокирующий режим
-  int flags = fcntl(cfd, F_GETFL, 0);
-  if (flags >= 0)
-    fcntl(cfd, F_SETFL, flags | O_NONBLOCK);
-
-  // 4: Добавляем узел в реестр
-  node_add(fp, name, cfd);
-
-  // 5: Добавляем fd в epoll
-  struct epoll_event ev = {.events = EPOLLIN, .data.fd = cfd};
-  epoll_ctl(epfd, EPOLL_CTL_ADD, cfd, &ev);
-
-  log_info("TCP connected to %s (%s) @ %s:%u, fd=%d", name, fp, ip, port, cfd);
-  printf("\r[%s connected]\n> ", name);
-  fflush(stdout);
-}
+// static void try_connect(const char *fp, const char *name, const char *ip,
+//                         uint16_t port, int epfd) {
+//   // 1: Уже подключены?
+//   int found_fd = -1;
+//   struct find_args a = {fp, name, &found_fd};
+//   node_each(find_node_by_fp, &a);
+//   if (found_fd == -1) {
+//     // Ищем по имени
+//     node_each(find_node_by_name, &a);
+//   }
+//   if (found_fd != -1) {
+//     log_debug("Already connected to %s (fd=%d)", name, found_fd);
+//     return; // подключены
+//   }
+//
+//   // 2: Подключаемся по TCP
+//   int cfd = transport_connect(ip, port);
+//   if (cfd < 0) {
+//     log_warn("TCP connect failed to %s @ %s:%u", name, ip, port);
+//     return;
+//   }
+//   log_info("TCP accepted: %u, port: %u", cfd, tcp_port);
+//
+//   // 3: Неблокирующий режим
+//   int flags = fcntl(cfd, F_GETFL, 0);
+//   if (flags >= 0)
+//     fcntl(cfd, F_SETFL, flags | O_NONBLOCK);
+//
+//   // 4: Добавляем узел в реестр
+//   node_add(fp, name, cfd, 0);
+//
+//   // 5: Добавляем fd в epoll
+//   struct epoll_event ev = {.events = EPOLLIN, .data.fd = cfd};
+//   epoll_ctl(epfd, EPOLL_CTL_ADD, cfd, &ev);
+//
+//   log_info("TCP connected to %s (%s) @ %s:%u, fd=%d", name, fp, ip, port,
+//   cfd); printf("\r[%s connected]\n> ", name); fflush(stdout);
+// }
 
 /*
  * handle_incoming — обработка входящего TCP-соединения
@@ -451,13 +426,16 @@ static void handle_incoming(int tcp_fd) {
     fcntl(cfd, F_SETFL, flags | O_NONBLOCK);
 
   // 3: добавляем узел
-  node_add("", "incoming", cfd);
+  node_add(NULL, NULL, cfd, 1);
 
   // 6: добавляем в epoll
   struct epoll_event ev = {.events = EPOLLIN, .data.fd = cfd};
   epoll_ctl(epfd, EPOLL_CTL_ADD, cfd, &ev);
 
   log_info("TCP accepted, fd=%d", cfd);
+
+  printf("\r\n> ");
+  fflush(stdout);
 }
 
 /*
@@ -467,9 +445,10 @@ static void handle_incoming(int tcp_fd) {
  * Читаем строку через transport_recv и выводим на экран.
  */
 static void handle_peer_data(int fd, uint32_t events) {
+  node_t *n = node_find_by_fd(fd);
+
   // Проверяем, не закрыто ли соединение
   if (events & (EPOLLHUP | EPOLLRDHUP)) {
-    node_t *n = node_find_by_fd(fd);
     if (n) {
       log_info("Disconnected: %s (fd=%d)", n->name, fd);
       printf("\r[%s disconnected]\n> ", n->name);
@@ -483,10 +462,10 @@ static void handle_peer_data(int fd, uint32_t events) {
   }
 
   // ── TLS ещё не установлен? ──
-  if (transport_tls_pending(fd)) {
-    accept_tls_handshake(fd);
-    return;
-  }
+  // if (transport_tls_pending(fd)) {
+  //   do_tls_handshake(fd, n->is_incoming);
+  //   return;
+  // }
 
   // Читаем сообщение
   const char *text = transport_recv(fd);
@@ -578,15 +557,60 @@ static void handle_discovery(int fd) {
 
   while (discovery_recv(fd, ip, fp, name, &port) == 1) {
     // Игнорируем свои пакеты
-    if (!strcmp(fp, g_config.my_fp))
+    if (!strcmp(g_config.my_fp, fp))
       continue;
 
-    log_info("Discovered: %s (%s) @ %s:%u", name, fp, ip, port);
+    // Правило: меньший fp не подулючается к большему
+    // (ждёт входящее от него)
+    if (strcmp(g_config.my_fp, fp) > 0) {
+      // log_debug("I'm senior to %s, waiting for incoming", name);
+      return;
+    }
+    // log_debug("I'm junior to %s, connecting", name);
 
-    printf("\r[%s discovered %s:%u]\n> ", name, ip, port);
+    // log_debug("Discovered: %s (%s) @ %s:%u", name, fp, ip, port);
+    // printf("\r[%s discovered %s:%u]\n> ", name, ip, port);
+    // fflush(stdout);
+
+    // 1: Уже подключены?
+    int found_fd = -1;
+    struct find_args a = {fp, name, &found_fd};
+    node_each(find_node_by_fp, &a);
+    if (found_fd == -1) {
+      // Ищем по имени
+      node_each(find_node_by_name, &a);
+    }
+    if (found_fd != -1) {
+      // log_debug("Already connected to %s (fd=%d)", name, found_fd);
+      return; // подключены
+    }
+
+    // 2: Подключаемся по TCP
+    int cfd = transport_connect(ip, port);
+    if (cfd < 0) {
+      log_warn("TCP connect failed to %s @ %s:%u", name, ip, port);
+      return;
+    }
+    log_info("TCP accepted: %u, port: %u", cfd, tcp_port);
+
+    // 3: Неблокирующий режим
+    int flags = fcntl(cfd, F_GETFL, 0);
+    if (flags >= 0)
+      fcntl(cfd, F_SETFL, flags | O_NONBLOCK);
+
+    // 4: Добавляем узел в реестр
+    node_add(fp, name, cfd, 0);
+
+    // 5: Добавляем fd в epoll
+    struct epoll_event ev = {.events = EPOLLIN, .data.fd = cfd};
+    epoll_ctl(epfd, EPOLL_CTL_ADD, cfd, &ev);
+
+    log_info("TCP connected to %s (%s) @ %s:%u, fd=%d", name, fp, ip, port,
+             cfd);
+    printf("\r[%s connected]\n> ", name);
     fflush(stdout);
 
-    try_connect(fp, name, ip, port, epfd);
+    // do_tls_handshake(cfd, 0);
   }
 }
 
@@ -698,9 +722,9 @@ int daemon_run(void) {
 
   // ——— Первый HELLO ———
 
-  // discovery_send_hello(udp_fd, g_config.my_fp, g_config.my_name,
-  //                      g_config.multicast_addr, g_config.multicast_port,
-  //                      tcp_port);
+  discovery_send_hello(udp_fd, g_config.my_fp, g_config.my_name,
+                       g_config.multicast_addr, g_config.multicast_port,
+                       tcp_port);
 
   // HELLO timer
   // evs — массив, куда epoll_wait запишет сработавшие события.
@@ -755,9 +779,9 @@ int daemon_run(void) {
 
     // Периодический HELLO
     if (time(NULL) >= next_hello) {
-      // discovery_send_hello(udp_fd, g_config.my_fp, g_config.my_name,
-      //                      g_config.multicast_addr, g_config.multicast_port,
-      //                      tcp_port);
+      discovery_send_hello(udp_fd, g_config.my_fp, g_config.my_name,
+                           g_config.multicast_addr, g_config.multicast_port,
+                           tcp_port);
       next_hello = time(NULL) + g_config.hello_interval;
       // printf("> ");
       // fflush(stdout);
