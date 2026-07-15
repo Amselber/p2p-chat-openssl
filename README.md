@@ -24,21 +24,14 @@
     cd certs && ./gen_certs.sh <name>
     make
     make run
-
-
-## Запуск на данном этапе
-
-    make
-    cd certs && ./gen_certs.sh alice bob
-    ./bin/p2pchat -c alice.ini
-    ./bin/p2pchat -c bob.ini
-
-    bob: >/_hello
-    alice: >/_tls bob
-    alice: >/msg bob Hello Bob!
-
 ```
 
+
+## Запуск тестового эксперимента
+Запуск 4х экземляров для теста. Необходимо наличие установленного Zellij (terminal multiplexer).
+``` bash
+    make itest
+```
 ## Технологии
 
 Linux, Make, OpenSSL, epoll.
