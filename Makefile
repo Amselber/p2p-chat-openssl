@@ -184,6 +184,12 @@ run: $(MAIN_BIN)
 clean:
 	rm -rf $(BUILD_DIR) $(BIN_DIR)
 
+itest:
+	@echo "Dependencies: Zellij terminal multiplexer"
+	make clean
+	make
+	./tests/integration/init.sh
+	./tests/integration/run.sh
 # -----------------------------------------------------------------------------
 # Информация о проекте (диагностика make-файла)
 # -----------------------------------------------------------------------------
