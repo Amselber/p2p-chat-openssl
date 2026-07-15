@@ -9,7 +9,23 @@ static int incoming_counter = 0;
 
 // Добавление ноды
 node_t *node_add(const char *fp, const char *name, int fd, int is_incoming) {
-  // 1. Проверяем: может, нода с таким fp уже есть?
+  // Ищем по fd
+  for (int i = 0; i < ncount; ++i) {
+    if (nodes[i].fd == fd) {
+      if (fp && fp[0]) {
+        strncpy(nodes[i].fp, fp, 64);
+        nodes[i].fp[64] = '\0';
+        if (name && name[0]) {
+          strncpy(nodes[i].name, name, 63);
+          nodes[i].name[63] = '\0';
+        }
+        nodes[i].is_incoming = is_incoming;
+        return &nodes[i];
+      }
+    }
+  }
+
+  // Проверяем: может, нода с таким fp уже есть?
   if (fp && fp[0]) {
     for (int i = 0; i < ncount; ++i) {
       if (!strcmp(nodes[i].fp, fp)) {
@@ -25,7 +41,7 @@ node_t *node_add(const char *fp, const char *name, int fd, int is_incoming) {
     }
   }
 
-  // 2. Места нет — отказ
+  // Места нет — отказ
   if (ncount >= MAX_NODES)
     return NULL;
 
@@ -38,14 +54,14 @@ node_t *node_add(const char *fp, const char *name, int fd, int is_incoming) {
     n->fp[64] = '\0';
   } else {
     // fp == NULL
-    snprintf(n->fp, sizeof(n->fp), "incoming_fp_%u", ++incoming_counter);
+    snprintf(n->fp, sizeof(n->fp), "unknown_fp_%u", ++incoming_counter);
   }
 
   if (name && name[0]) {
     strncpy(n->name, name, 63);
     n->fp[63] = '\0';
   } else {
-    snprintf(n->name, sizeof(n->name), "incoming_name_%u", incoming_counter);
+    snprintf(n->name, sizeof(n->name), "unknown_name_%u", incoming_counter);
   }
 
   n->fp[64] = '\0';   // гарантируем null-терминатор
