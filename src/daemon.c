@@ -16,6 +16,7 @@
  *   6. Первый HELLO
  *   7. Главный цикл epoll
  */
+#define _POSIX_C_SOURCE 199309L
 
 #include "daemon.h"
 #include "cli.h"
@@ -24,12 +25,15 @@
 #include "log.h"
 #include "node.h"
 #include "transport.h"
+#include <dirent.h>
 #include <fcntl.h>
 #include <signal.h>
+#include <stddef.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <string.h>
 #include <sys/epoll.h>
+#include <sys/stat.h>
 #include <time.h>
 #include <unistd.h>
 
@@ -41,6 +45,12 @@ static int epfd;
 static int udp_fd;
 static int tcp_fd;
 static uint16_t tcp_port = 0; // 0 - OS Selected
+
+/* Хелпер: сон в миллисекундах */
+static void sleep_ms(int ms) {
+  struct timespec ts = {.tv_sec = ms / 1000, .tv_nsec = (ms % 1000) * 1000000L};
+  nanosleep(&ts, NULL);
+}
 
 /* ─── Обработчик сигналов ─── */
 
@@ -123,6 +133,8 @@ static void do_tls_handshake(int fd, int is_incoming) {
   if (!transport_tls_pending(fd))
     return;
 
+  log_debug("do_tls_handshake ENTER: fd=%d, is_incoming=%d, pending=%d", fd,
+            is_incoming, transport_tls_pending(fd));
   int rc = -1;
   if (!is_incoming) {
     rc = transport_tls_connect(fd);
@@ -139,16 +151,55 @@ static void do_tls_handshake(int fd, int is_incoming) {
                peer_name ? peer_name : "?", peer_fp, fd);
       node_add(peer_fp, peer_name ? peer_name : "?", fd, is_incoming);
       printf("[TLS] %s verified\n", peer_name ? peer_name : peer_fp);
+      fflush(stdout);
     }
+    log_debug("do_tls_handshake EXIT: fd=%d", fd);
+    printf("> ");
+    fflush(stdout);
     return;
   }
 
+  log_debug("do_tls_handshake EXIT: fd=%d", fd);
   if (errno == EAGAIN) {
     printf("[TLS] : handshake in progress...\n");
     return;
   }
 
   printf("[TLS] : handshake failed\n");
+}
+
+static void receive_file(int fd, const char *fname, size_t size) {
+  char path[512];
+  snprintf(path, sizeof(path), "downloads/%s", fname);
+
+  FILE *f = fopen(path, "wb");
+  if (!f) {
+    log_warn("Cannot create file: %s", path);
+    return;
+  }
+
+  char buf[8192];
+  size_t received = 0;
+
+  while (received < size) {
+    size_t to_read = sizeof(buf);
+    if (size - received < to_read)
+      to_read = (size_t)(size - received);
+
+    const char *data = transport_recv_raw(fd, to_read);
+    if (!data) {
+      log_warn("File transfer interrupted");
+      break;
+    }
+
+    fwrite(data, 1, to_read, f);
+    received += to_read;
+  }
+
+  fclose(f);
+  log_info("File received: %s (%ld bytes)", fname, received);
+  printf("\r[FILE] %s received (%ld bytes)\n> ", fname, received);
+  fflush(stdout);
 }
 
 /*
@@ -327,6 +378,118 @@ static CommandResult cmd_tls(int argc, char **argv) {
     return result_error("TLS handshake failed");
 }
 
+/*
+ * /ls [path]
+ * Показывает файлы в директории загрузок (или указанной).
+ * Без аргументов — downloads/
+ */
+static CommandResult cmd_ls(int argc, char **argv) {
+  const char *path = "downloads";
+  if (argc >= 1)
+    path = argv[0];
+
+  DIR *dir = opendir(path);
+  if (!dir)
+    return result_error("Cannot open directory");
+
+  printf("\r%-40s %10s\n", "Name", "Size");
+  printf("%-40s %10s\n", "----------------------------------------",
+         "----------");
+
+  struct dirent *entry;
+  struct stat st;
+  char fullpath[512];
+
+  while ((entry = readdir(dir)) != NULL) {
+    if (entry->d_name[0] == '.')
+      continue; // пропускаем . и ..
+
+    snprintf(fullpath, sizeof(fullpath), "%s/%s", path, entry->d_name);
+    if (stat(fullpath, &st) == 0 && S_ISREG(st.st_mode)) {
+      long size = st.st_size;
+      char sizestr[64];
+      if (size < 1024)
+        snprintf(sizestr, sizeof(sizestr), "%ld B", (long)size);
+      else if (size < 1024 * 1024)
+        snprintf(sizestr, sizeof(sizestr), "%ld KB", (long)size / 1024);
+      else
+        snprintf(sizestr, sizeof(sizestr), "%ld MB",
+                 (long)size / (1024 * 1024));
+
+      printf("  %-38s %10s\n", entry->d_name, sizestr);
+    }
+  }
+
+  closedir(dir);
+  return result_success(NULL);
+}
+
+/*
+ * /file <name-or-fp> <path>
+ * Отправляет файл указанному узлу.
+ */
+static CommandResult cmd_file(int argc, char **argv) {
+  if (argc < 2)
+    return result_error("Usage: /file <name-or-fp> <path>");
+
+  // Ищем узел
+  int found_fd = -1;
+  struct find_args a = {argv[0], argv[0], &found_fd};
+  node_each(find_node_by_name, &a);
+  if (found_fd == -1)
+    return result_error("Node not online");
+
+  // if (transport_tls_pending(found_fd))
+  //   return result_error("TLS not ready");
+
+  /* Открываем файл */
+  FILE *f = fopen(argv[1], "rb");
+  if (!f) {
+    log_error("Cannot open file: %s", argv[1]);
+    return result_error("Cannot open file");
+  }
+
+  /* Размер файла */
+  fseek(f, 0, SEEK_END);
+  ssize_t size = ftell(f);
+  rewind(f);
+
+  /* Имя файла (без пути) */
+  const char *fname = strrchr(argv[1], '/');
+  fname = fname ? fname + 1 : argv[1];
+
+  /* Отправляем заголовок */
+  char header[512];
+  snprintf(header, sizeof(header), "FILE:%s:%ld", fname, size);
+  if (transport_send(found_fd, header) < 0) {
+    fclose(f);
+    return result_error("Send failed");
+  }
+
+  /* Отправляем данные */
+  char buf[8192];
+  size_t n;
+  size_t sent = 0;
+
+  while ((n = fread(buf, 1, sizeof(buf), f)) > 0) {
+    if (transport_send_raw(found_fd, buf, n) < 0) {
+      fclose(f);
+      return result_error("Send failed");
+    }
+    sent += n;
+  }
+
+  fclose(f);
+
+  /* Отправляем конец */
+  transport_send(found_fd, "FILE_END");
+
+  log_info("File sent: %s (%ld bytes) to %s", fname, sent, argv[0]);
+  static char msg[256];
+  snprintf(msg, sizeof(msg), "Sent %s (%ld bytes)", fname, sent);
+  return result_success(msg);
+}
+
 // Регистрация всех команд
 static void register_commands(void) {
   static Command cmds[] = {{"quit", "Exit", cmd_quit},
@@ -337,6 +500,8 @@ static void register_commands(void) {
                            {"nodes", "List connected nodes", cmd_nodes},
                            {"_hello", "Discovery send HELLO", cmd_send_hello},
                            {"_tls", "TLS handshake with node", cmd_tls},
+                           {"file", "Send file to node", cmd_file},
+                           {"ls", "List file in downloads idr", cmd_ls},
                            {NULL, NULL, NULL}};
 
   int i;
@@ -433,9 +598,11 @@ static void handle_incoming(int tcp_fd) {
   epoll_ctl(epfd, EPOLL_CTL_ADD, cfd, &ev);
 
   log_info("TCP accepted, fd=%d", cfd);
-
   printf("\r\n> ");
   fflush(stdout);
+
+  // 2. Начинаем TLS-рукопожатие
+  // do_tls_handshake(tcp_fd, 0);
 }
 
 /*
@@ -461,11 +628,8 @@ static void handle_peer_data(int fd, uint32_t events) {
     return;
   }
 
-  // ── TLS ещё не установлен? ──
-  // if (transport_tls_pending(fd)) {
-  //   do_tls_handshake(fd, n->is_incoming);
-  //   return;
-  // }
+  // Если TLS ещё не готов — продолжаем рукопожатие
+  do_tls_handshake(fd, n->is_incoming);
 
   // Читаем сообщение
   const char *text = transport_recv(fd);
@@ -474,6 +638,27 @@ static void handle_peer_data(int fd, uint32_t events) {
     node_t *n = node_find_by_fd(fd);
     printf("\r[%s]: %s\n> ", n ? n->name : "???", text);
     fflush(stdout);
+  }
+
+  if (!text)
+    return;
+  if (strncmp(text, "FILE:", 5) == 0) {
+    // Начало передачи
+    char fname[256];
+    size_t size;
+    sscanf(text, "FILE:%255[^:]:%u", fname, (unsigned int *)&size);
+
+    printf("\r[%s] Receiving file: %s (%ld bytes)\n> ", n ? n->name : "???",
+           fname, size);
+    fflush(stdout);
+
+    receive_file(fd, fname, size);
+    return;
+  }
+
+  if (strcmp(text, "FILE END") == 0) {
+    // Конец передачи (при передачи через буфер)
+    return;
   }
   // Если text == NULL и это не EPOLLHUP — значит данных пока нет (EAGAIN).
   // Ничего не делаем, epoll сообщит когда будут.
@@ -610,7 +795,7 @@ static void handle_discovery(int fd) {
     printf("\r[%s connected]\n> ", name);
     fflush(stdout);
 
-    // do_tls_handshake(cfd, 0);
+    do_tls_handshake(cfd, 0);
   }
 }
 
@@ -722,6 +907,7 @@ int daemon_run(void) {
 
   // ——— Первый HELLO ———
 
+  sleep_ms(500);
   discovery_send_hello(udp_fd, g_config.my_fp, g_config.my_name,
                        g_config.multicast_addr, g_config.multicast_port,
                        tcp_port);
