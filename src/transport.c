@@ -652,3 +652,43 @@ const char *transport_recv(int fd) {
   buf[pos] = '\0';
   return buf;
 }
+
+/*
+ * transport_send_raw отправить файл
+ */
+int transport_send_raw(int fd, const void *data, size_t len) {
+  SSL *ssl = ssl_get(fd);
+  size_t sent = 0;
+  const char *p = data;
+
+  while (sent < len) {
+    ssize_t n = ssl ? SSL_write(ssl, p + sent, (int)(len - sent))
+                    : write(fd, p + sent, len - sent);
+    if (n <= 0)
+      return -1;
+    sent += (size_t)n;
+  }
+  return 0;
+}
+
+/*
+ * Получить файл
+ */
+const char *transport_recv_raw(int fd, size_t len) {
+  SSL *ssl = ssl_get(fd);
+  static char buf[8192];
+
+  size_t received = 0;
+  while (received < len) {
+    size_t to_read = len - received;
+    if (to_read > sizeof(buf))
+      to_read = sizeof(buf);
+
+    ssize_t n = ssl ? SSL_read(ssl, buf + received, (int)to_read)
+                    : read(fd, buf + received, to_read);
+    if (n <= 0)
+      return NULL;
+    received += (size_t)n;
+  }
+  return buf;
+}

@@ -1,6 +1,7 @@
 // src/transport.h
 #ifndef TRANSPORT_H
 #define TRANSPORT_H
+#include <stddef.h>
 #include <stdint.h>
 
 /**
@@ -251,5 +252,19 @@ int transport_send(int fd, const char *text);
  *         или NULL если данных нет / соединение закрыто
  */
 const char *transport_recv(int fd);
+
+/**
+ * @brief Отправить файл
+ *
+ *
+ */
+int transport_send_raw(int fd, const void *data, size_t len);
+
+/**
+ * @brief Получить файл
+ *
+ *
+ */
+const char *transport_recv_raw(int fd, size_t len);
 
 #endif
