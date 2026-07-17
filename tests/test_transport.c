@@ -10,9 +10,9 @@
 #include <time.h>
 #include <unistd.h>
 
-#define CA "certs/rootCA.crt"
-#define CERT "certs/client.crt"
-#define KEY "certs/client.key"
+#define CA "bin/tmp/rootCA.crt"
+#define CERT "bin/tmp/client.crt"
+#define KEY "bin/tmp/client.key"
 
 static int listen_fd = -1;
 static uint16_t port;
