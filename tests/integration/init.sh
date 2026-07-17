@@ -18,7 +18,7 @@ done
 echo "Test file for send. Hello World!" >bin/test/file.txt
 cp bin/test/file.txt bin/test/chat1/downloads
 
-certs/gen_certs.sh alice bob jack johnny
+certs/gen_certs.sh ./ alice bob jack johnny
 
 for dir in "${DIRS[@]}"; do
   cp bin/p2pchat bin/test/"$dir"
