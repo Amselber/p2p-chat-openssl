@@ -3,6 +3,7 @@
 #define TRANSPORT_H
 #include <stddef.h>
 #include <stdint.h>
+#include <sys/types.h>
 
 /**
  * @file transport.h
@@ -254,17 +255,17 @@ int transport_send(int fd, const char *text);
 const char *transport_recv(int fd);
 
 /**
- * @brief Отправить файл
+ * @brief Отправить сырые данные
  *
  *
  */
 int transport_send_raw(int fd, const void *data, size_t len);
 
 /**
- * @brief Получить файл
+ * @brief Получить сырые данные
  *
  *
  */
-const char *transport_recv_raw(int fd, size_t len);
+ssize_t transport_recv_raw(int fd, void *buf, size_t len);
 
 #endif

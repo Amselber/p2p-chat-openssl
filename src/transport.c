@@ -654,12 +654,12 @@ const char *transport_recv(int fd) {
 }
 
 /*
- * transport_send_raw отправить файл
+ * transport_send_raw отправить сырые данные
  */
 int transport_send_raw(int fd, const void *data, size_t len) {
   SSL *ssl = ssl_get(fd);
   size_t sent = 0;
-  const char *p = data;
+  const char *p = (const char *)data;
 
   while (sent < len) {
     ssize_t n = ssl ? SSL_write(ssl, p + sent, (int)(len - sent))
@@ -672,23 +672,14 @@ int transport_send_raw(int fd, const void *data, size_t len) {
 }
 
 /*
- * Получить файл
+ * Получить сырые данные
  */
-const char *transport_recv_raw(int fd, size_t len) {
+ssize_t transport_recv_raw(int fd, void *buf, size_t len) {
   SSL *ssl = ssl_get(fd);
-  static char buf[8192];
-
-  size_t received = 0;
-  while (received < len) {
-    size_t to_read = len - received;
-    if (to_read > sizeof(buf))
-      to_read = sizeof(buf);
-
-    ssize_t n = ssl ? SSL_read(ssl, buf + received, (int)to_read)
-                    : read(fd, buf + received, to_read);
-    if (n <= 0)
-      return NULL;
-    received += (size_t)n;
-  }
-  return buf;
+  ssize_t n = 0;
+  if (!ssl)
+    n = read(fd, buf, len);
+  else
+    n = SSL_read(ssl, buf, (int)len);
+  return n;
 }
