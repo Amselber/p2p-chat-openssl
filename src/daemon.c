@@ -37,7 +37,22 @@
 #include <time.h>
 #include <unistd.h>
 
+/* ─── Константы ─── */
+#define MAX_TRANSFERS 4
 #define MAX_EVENTS 16
+
+/* ─── Состояние передачи файла ─── */
+
+typedef enum { XFER_NONE, XFER_DATA } xfer_state_t;
+
+typedef struct {
+  int fd;
+  xfer_state_t state;
+  char fname[256];
+  size_t size;
+  size_t received;
+  FILE *file;
+} file_transfer_t;
 
 /* ─── Глобальные переменные ─── */
 static volatile int running = 1;
@@ -45,8 +60,9 @@ static int epfd;
 static int udp_fd;
 static int tcp_fd;
 static uint16_t tcp_port = 0; // 0 - OS Selected
+static file_transfer_t g_xfers[MAX_TRANSFERS];
 
-/* Хелпер: сон в миллисекундах */
+/* ———  Хелпер: сон в миллисекундах ——— */
 static void sleep_ms(int ms) {
   struct timespec ts = {.tv_sec = ms / 1000, .tv_nsec = (ms % 1000) * 1000000L};
   nanosleep(&ts, NULL);
@@ -168,38 +184,142 @@ static void do_tls_handshake(int fd, int is_incoming) {
   printf("[TLS] : handshake failed\n");
 }
 
-static void receive_file(int fd, const char *fname, size_t size) {
-  char path[512];
-  snprintf(path, sizeof(path), "downloads/%s", fname);
+// static void receive_file(int fd, const char *fname, size_t size) {
+//   char path[512];
+//   snprintf(path, sizeof(path), "downloads/%s", fname);
+//
+//   FILE *f = fopen(path, "wb");
+//   if (!f) {
+//     log_warn("Cannot create file: %s", path);
+//     return;
+//   }
+//
+//   char buf[8192];
+//   size_t received = 0;
+//
+//   while (received < size) {
+//     size_t to_read = sizeof(buf);
+//     if (size - received < to_read)
+//       to_read = (size_t)(size - received);
+//
+//     const char *data = transport_recv_raw(fd, to_read);
+//     if (!data) {
+//       log_warn("File transfer interrupted");
+//       break;
+//     }
+//
+//     fwrite(data, 1, to_read, f);
+//     received += to_read;
+//   }
+//
+//   fclose(f);
+//   log_info("File received: %s (%ld bytes)", fname, received);
+//   printf("\r[FILE] %s received (%ld bytes)\n> ", fname, received);
+//   fflush(stdout);
+// }
+//
 
-  FILE *f = fopen(path, "wb");
-  if (!f) {
-    log_warn("Cannot create file: %s", path);
+/*
+ * ================================================================
+ * ===================== Передача файлов ==========================
+ * ================================================================
+ */
+
+static file_transfer_t *find_transfer(int fd) {
+  for (int i = 0; i < MAX_TRANSFERS; i++) {
+    if (g_xfers[i].fd == fd && g_xfers[i].state != XFER_NONE)
+      return &g_xfers[i];
+  }
+  return NULL;
+}
+
+static file_transfer_t *alloc_transfer(int fd) {
+  for (int i = 0; i < MAX_TRANSFERS; i++) {
+    if (g_xfers[i].state == XFER_NONE) {
+      memset(&g_xfers[i], 0, sizeof(g_xfers[i]));
+      g_xfers[i].fd = fd;
+      return &g_xfers[i];
+    }
+  }
+  return NULL;
+}
+
+static void cleanup_transfer(int fd) {
+  file_transfer_t *xfer = find_transfer(fd);
+  if (xfer) {
+    if (xfer->file)
+      fclose(xfer->file);
+    memset(xfer, 0, sizeof(*xfer));
+  }
+}
+
+static void receive_chunk(file_transfer_t *xfer) {
+  char buf[8192];
+
+  while (xfer->received < xfer->size) {
+    size_t remaining = xfer->size - xfer->received;
+    size_t to_read = sizeof(buf);
+    if (remaining < to_read)
+      to_read = (size_t)remaining;
+
+    ssize_t n = transport_recv_raw(xfer->fd, buf, to_read);
+
+    if (n <= 0) {
+      if (errno == EAGAIN || errno == EWOULDBLOCK)
+        return;
+      log_warn("File read error: fd=%d, n=%zd, errno=%d", xfer->fd, n, errno);
+      fclose(xfer->file);
+      memset(xfer, 0, sizeof(*xfer));
+      return;
+    }
+
+    fwrite(buf, 1, (size_t)n, xfer->file);
+    xfer->received += (size_t)n;
+  }
+
+  fclose(xfer->file);
+  log_info("File received: %s (%ld bytes)", xfer->fname, xfer->received);
+  printf("\r[FILE] %s received (%ld bytes)\n> ", xfer->fname, xfer->received);
+  fflush(stdout);
+  memset(xfer, 0, sizeof(*xfer));
+}
+
+static void start_transfer(int fd, const char *header) {
+  file_transfer_t *xfer = alloc_transfer(fd);
+  if (!xfer) {
+    log_warn("Too many transfers");
     return;
   }
 
-  char buf[8192];
-  size_t received = 0;
-
-  while (received < size) {
-    size_t to_read = sizeof(buf);
-    if (size - received < to_read)
-      to_read = (size_t)(size - received);
-
-    const char *data = transport_recv_raw(fd, to_read);
-    if (!data) {
-      log_warn("File transfer interrupted");
-      break;
-    }
-
-    fwrite(data, 1, to_read, f);
-    received += to_read;
+  char fname[256];
+  size_t size;
+  if (sscanf(header, "FILE:%255[^:]:%lu", fname, &size) != 2) {
+    log_warn("Bad header: %s", header);
+    memset(xfer, 0, sizeof(*xfer));
+    return;
   }
 
-  fclose(f);
-  log_info("File received: %s (%ld bytes)", fname, received);
-  printf("\r[FILE] %s received (%ld bytes)\n> ", fname, received);
+  char path[512];
+  snprintf(path, sizeof(path), "downloads/%s", fname);
+
+  xfer->file = fopen(path, "wb");
+  if (!xfer->file) {
+    log_warn("Cannot create: %s", path);
+    memset(xfer, 0, sizeof(*xfer));
+    return;
+  }
+
+  xfer->size = size;
+  xfer->state = XFER_DATA;
+  strncpy(xfer->fname, fname, 255);
+  xfer->fname[255] = '\0';
+
+  node_t *n = node_find_by_fd(fd);
+  printf("\r[%s] Receiving: %s (%lu bytes)\n> ", n ? n->name : "?", fname,
+         size);
   fflush(stdout);
+
+  receive_chunk(xfer);
 }
 
 /*
@@ -616,6 +736,7 @@ static void handle_peer_data(int fd, uint32_t events) {
 
   // Проверяем, не закрыто ли соединение
   if (events & (EPOLLHUP | EPOLLRDHUP)) {
+    cleanup_transfer(fd);
     if (n) {
       log_info("Disconnected: %s (fd=%d)", n->name, fd);
       printf("\r[%s disconnected]\n> ", n->name);
@@ -633,33 +754,26 @@ static void handle_peer_data(int fd, uint32_t events) {
 
   // Читаем сообщение
   const char *text = transport_recv(fd);
+
+  if (!text)
+    return;
+
   if (text) {
     // Сообщение получено — выводим
-    node_t *n = node_find_by_fd(fd);
     printf("\r[%s]: %s\n> ", n ? n->name : "???", text);
     fflush(stdout);
   }
 
-  if (!text)
-    return;
   if (strncmp(text, "FILE:", 5) == 0) {
     // Начало передачи
-    char fname[256];
-    size_t size;
-    sscanf(text, "FILE:%255[^:]:%u", fname, (unsigned int *)&size);
-
-    printf("\r[%s] Receiving file: %s (%ld bytes)\n> ", n ? n->name : "???",
-           fname, size);
-    fflush(stdout);
-
-    receive_file(fd, fname, size);
+    start_transfer(fd, text);
     return;
   }
 
-  if (strcmp(text, "FILE END") == 0) {
-    // Конец передачи (при передачи через буфер)
-    return;
-  }
+  // if (strcmp(text, "FILE END") == 0) {
+  //   // Конец передачи (при передачи через буфер)
+  //   return;
+  // }
   // Если text == NULL и это не EPOLLHUP — значит данных пока нет (EAGAIN).
   // Ничего не делаем, epoll сообщит когда будут.
 }
