@@ -155,6 +155,44 @@ void test_tls_send_recv(void) {
   transport_tls_cleanup();
 }
 
+// fingerprint пира после TLS
+void test_peer_fingerprint(void) {
+  transport_tls_init(CA, CERT, KEY);
+
+  int client = transport_connect("127.0.0.1", port);
+  int server = transport_accept(listen_fd);
+
+  tls_handshake(client, server);
+
+  const char *fp_server = transport_peer_fingerprint(server);
+  TEST_ASSERT_NOT_NULL(fp_server);
+  TEST_ASSERT_EQUAL(64, strlen(fp_server));
+
+  const char *fp_client = transport_peer_fingerprint(client);
+  TEST_ASSERT_NOT_NULL(fp_client);
+  TEST_ASSERT_EQUAL(64, strlen(fp_client));
+
+  transport_tls_cleanup();
+}
+
+// тест send_raw для файлов
+void test_send_recv_raw(void) {
+  transport_tls_init(CA, CERT, KEY);
+
+  int client = transport_connect("127.0.0.1", port);
+  int server = transport_accept(listen_fd);
+
+  unsigned char data[] = {0x00, 0x01, 0x02, 0xFF, 0xFE, 0xFD};
+  TEST_ASSERT_EQUAL(0, transport_send_raw(client, data, sizeof(data)));
+
+  unsigned char buf[16];
+  ssize_t n = transport_recv_raw(server, buf, sizeof(buf));
+  TEST_ASSERT_EQUAL(sizeof(data), n);
+  TEST_ASSERT_EQUAL_MEMORY(data, buf, sizeof(data));
+
+  transport_tls_cleanup();
+}
+
 int main_test_transport(void) {
   setUp_test_transport();
   UNITY_BEGIN();
@@ -167,6 +205,8 @@ int main_test_transport(void) {
   RUN_TEST(test_tls_init_ok);
   RUN_TEST(test_self_fingerprint);
   RUN_TEST(test_tls_send_recv);
+  RUN_TEST(test_peer_fingerprint);
+  RUN_TEST(test_send_recv_raw);
 
   if (listen_fd >= 0)
     transport_close(listen_fd);
