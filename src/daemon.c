@@ -46,6 +46,7 @@ static int epfd;
 static int udp_fd;
 static int tcp_fd;
 static uint16_t tcp_port = 0; // 0 - OS Selected
+volatile int general_chat_active = 1;
 
 /* ———  Хелпер: сон в миллисекундах ——— */
 static void sleep_ms(int ms) {
@@ -135,9 +136,11 @@ static void handle_stdin(void) {
           log_debug("Running command: %s (%d args)", av[1], ac - 1);
           cli_run(ac, av); // Выполняем команду
         } else {
-          log_debug("Send message to all connected nodes: %s", buf);
-          struct broadcast_args ba = {buf};
-          node_each(send_to_node, &ba);
+          if (general_chat_active) {
+            log_debug("Send message to all connected nodes: %s", buf);
+            struct broadcast_args ba = {buf};
+            node_each(send_to_node, &ba);
+          }
         }
       }
       // Сбрасываем буфер для следующей строки
@@ -172,6 +175,10 @@ static void handle_discovery(int fd) {
 int daemon_run(void) {
   log_info("Daemon starting");
 
+  // Set commands context
+  g_ctx.active = &general_chat_active;
+
+  // sqlite3 init
   msg_store_init("chat.db");
 
   // SIGINT SIGTERM register handler

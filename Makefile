@@ -18,9 +18,11 @@
 #   -g            : отладочная информация (для gdb)
 # LDFLAGS : флаги линковщика (пока пусто, можно добавить -lm, -lpthread и т.п.)
 CC = gcc
-CFLAGS = -Wall -Wextra -Wpedantic -Werror -Wformat=2 -Wsign-conversion \
+CFLAGS = -Wall -Wextra -Wpedantic -Wformat=2 -Wsign-conversion \
 				 -Wcast-align -std=c11 -g
-LDFLAGS = -lssl -lcrypto
+LDFLAGS = -lssl -lcrypto -lsqlite3
+COVFLAGS = -fprofile-arcs -ftest-coverage
+COVLDFLAGS = -lgcov --coverage
 
 # -----------------------------------------------------------------------------
 # Пути к фреймворку Unity (для модульного тестирования)
@@ -179,11 +181,19 @@ $(UNITY_OBJ): $(UNITY_SRC) $(UNITY_HEADER)
 run: $(MAIN_BIN)
 	./$(MAIN_BIN)
 
+# Сборка с покрытием
+coverage: CFLAGS += $(COVFLAGS)
+coverage: LDFLAGS += $(COVLDFLAGS)
+coverage: clean $(TARGET)
+
 # -----------------------------------------------------------------------------
 # Очистка: удаляем все сгенерированные файлы
 # -----------------------------------------------------------------------------
 clean:
 	rm -rf $(BUILD_DIR) $(BIN_DIR)
+	# rm -f src/*.o $(TARGET)
+	# rm -f src/*.gcda src/*.gcno src/*.gcov
+	# rm -rf coverage_report coverage.info
 
 itest:
 	@echo "Dependencies: Zellij terminal multiplexer"

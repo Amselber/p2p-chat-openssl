@@ -63,6 +63,21 @@ static void print_history_msg(stored_msg_t *msg, void *arg) {
  * ========================= Команды CLI ==========================
  * ================================================================
  */
+static CommandResult cmd_join(int argc, char **argv) {
+  (void)argc;
+  (void)argv;
+  *g_ctx.active = 1;
+  log_info("Joined chat");
+  return result_success("Joined chat");
+}
+
+static CommandResult cmd_leave(int argc, char **argv) {
+  (void)argc;
+  (void)argv;
+  *g_ctx.active = 0;
+  log_info("Left chat");
+  return result_success("Left chat");
+}
 
 static CommandResult cmd_history(int argc, char **argv) {
   (void)argc;
@@ -352,6 +367,8 @@ void commands_register(void) {
                            {"ls", "List file in downloads idr", cmd_ls},
                            {"history", "Print messages history", cmd_history},
                            {"edit", "Edit message in history", cmd_edit},
+                           {"join", "Join to general chat", cmd_join},
+                           {"leave", "Leave general chat", cmd_leave},
                            {NULL, NULL, NULL}};
 
   int i;

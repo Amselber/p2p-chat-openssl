@@ -10,6 +10,7 @@
 #include <sys/epoll.h>
 
 static int g_epfd = -1;
+extern int general_chat_active;
 
 void connection_init(int epfd) { g_epfd = epfd; }
 
@@ -175,10 +176,6 @@ void connection_handle_peer_data(int fd, uint32_t events) {
     return;
 
   if (text) {
-    // Сообщение получено — выводим
-    printf("\r[%s]: %s\n> ", n ? n->name : "???", text);
-    fflush(stdout);
-
     if (strncmp(text, "FILE:", 5) == 0) {
       // Начало передачи
       file_transfer_start(fd, text);
@@ -195,6 +192,22 @@ void connection_handle_peer_data(int fd, uint32_t events) {
         // показать в UI
       }
       return;
+    }
+
+    // Сообщение получено — выводим
+    if (!strcmp(text, "/msg")) {
+      // Приватное сообщение /msg
+      printf("\r[%s (private)]: %s\n> ", n ? n->name : "???", text + 1);
+      fflush(stdout);
+      msg_store_add(n ? n->name : "???", "private", text + 1);
+    } else {
+      // Общий чат
+      msg_store_add(n ? n->name : "???", "", text);
+      if (general_chat_active) {
+        printf("\r[%s]: %s\n> ", n ? n->name : "???", text);
+        fflush(stdout);
+      }
+      // Если не active — сообщение сохранено, но не показано
     }
   }
 }

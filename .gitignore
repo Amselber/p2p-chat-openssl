@@ -66,3 +66,5 @@ certs/*.crt
 certs/*.key
 certs/*.csr
 certs/*.srl
+.gdb_history
+chat.db
