@@ -1,6 +1,7 @@
 #include "connection.h"
 #include "file_transfer.h"
 #include "log.h"
+#include "msg_store.h"
 #include "node.h"
 #include "transport.h"
 #include <fcntl.h>
@@ -177,12 +178,24 @@ void connection_handle_peer_data(int fd, uint32_t events) {
     // Сообщение получено — выводим
     printf("\r[%s]: %s\n> ", n ? n->name : "???", text);
     fflush(stdout);
-  }
 
-  if (strncmp(text, "FILE:", 5) == 0) {
-    // Начало передачи
-    file_transfer_start(fd, text);
-    return;
+    if (strncmp(text, "FILE:", 5) == 0) {
+      // Начало передачи
+      file_transfer_start(fd, text);
+      return;
+    }
+
+    msg_store_add(n ? n->name : "???", "", text);
+
+    if (strncmp(text, "EDIT:", 5) == 0) {
+      int id;
+      char new_text[4096];
+      if (sscanf(text, "EDIT:%d:%4095[^\n]", &id, new_text) == 2) {
+        msg_store_edit(id, new_text);
+        // показать в UI
+      }
+      return;
+    }
   }
 }
 

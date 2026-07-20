@@ -2,10 +2,12 @@
 #include "cli.h"
 #include "config.h"
 #include "log.h"
+#include "msg_store.h"
 #include "node.h"
 #include "transport.h"
 #include <dirent.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
 
@@ -48,11 +50,63 @@ static void find_node_by_name(node_t *n, void *arg) {
   if (!strcmp(n->name, a->name) && n->fd != -1)
     *a->found_fd = n->fd;
 }
+
+static void print_history_msg(stored_msg_t *msg, void *arg) {
+  (void)arg;
+  char ts[32];
+  strftime(ts, sizeof(ts), "%H:%M", localtime(&msg->timestamp));
+  printf("  [%s] %s: %s%s\n", ts, msg->sender, msg->text,
+         msg->edited ? " (edited)" : "");
+}
 /*
  * ================================================================
  * ========================= Команды CLI ==========================
  * ================================================================
  */
+
+static CommandResult cmd_history(int argc, char **argv) {
+  (void)argc;
+  (void)argv;
+  printf("\rHistory:\n");
+  msg_store_for_each(print_history_msg, NULL);
+  return result_success(NULL);
+}
+
+static CommandResult cmd_edit(int argc, char **argv) {
+  if (argc < 1)
+    return result_error("Usage: /edit [id] <text>");
+
+  int id, text_start;
+  if (argv[0][0] >= '0' && argv[0][0] <= '9') {
+    id = atoi(argv[0]);
+    text_start = 1;
+  } else {
+    id = msg_store_last_id(g_config.my_name);
+    text_start = 0;
+  }
+
+  if (id < 0)
+    return result_error("No messages");
+
+  static char text[4096];
+  text[0] = '\0';
+  for (int i = text_start; i < argc; i++) {
+    if (i > text_start)
+      strcat(text, " ");
+    strcat(text, argv[i]);
+  }
+
+  msg_store_edit(id, text);
+
+  /* Отправляем всем */
+  char edit_msg[4280];
+  snprintf(edit_msg, sizeof(edit_msg), "EDIT:%d:%s", id, text);
+  g_ctx.broadcast(edit_msg);
+
+  static char buf[64];
+  snprintf(buf, sizeof(buf), "Edited #%d", id);
+  return result_success(buf);
+}
 
 /*
  * cmd_quit — /quit
@@ -296,6 +350,8 @@ void commands_register(void) {
                            {"nodes", "List connected nodes", cmd_nodes},
                            {"file", "Send file to node", cmd_file},
                            {"ls", "List file in downloads idr", cmd_ls},
+                           {"history", "Print messages history", cmd_history},
+                           {"edit", "Edit message in history", cmd_edit},
                            {NULL, NULL, NULL}};
 
   int i;

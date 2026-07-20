@@ -25,6 +25,7 @@
 #include "connection.h"
 #include "discovery.h"
 #include "log.h"
+#include "msg_store.h"
 #include "node.h"
 #include "transport.h"
 #include <fcntl.h>
@@ -170,6 +171,8 @@ static void handle_discovery(int fd) {
  */
 int daemon_run(void) {
   log_info("Daemon starting");
+
+  msg_store_init("chat.db");
 
   // SIGINT SIGTERM register handler
   signal(SIGINT, on_signal);
@@ -344,5 +347,7 @@ int daemon_run(void) {
   close(tcp_fd);
   close(epfd);
   log_info("Daemon stopped");
+
+  msg_store_close();
   return 0;
 }
