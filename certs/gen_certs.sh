@@ -29,7 +29,7 @@ fi
 # Парсинг аргументов
 if [ $# -eq 0 ]; then
   OUT_DIR="certs"
-  NAMES=(alice bob charlie jack)
+  NAMES=(client alice bob charlie jack)
 elif [ $# -eq 1 ]; then
   OUT_DIR="$1"
   NAMES=(alice bob charlie jack)
