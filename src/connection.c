@@ -15,7 +15,7 @@ void connection_init(int epfd) { g_epfd = epfd; }
 /* do_tls_handshake — выполняет TLS-рукопожатие для одного узла.
  * Вызывается из команды /tls и из /tls_all.
  */
-void connection_tls_handshake(int fd, int is_incoming) {
+static void connection_tls_handshake(int fd, int is_incoming) {
   // Отсутствует TCP-соединение с узлом
   if (fd <= 0)
     return; // офлайн
@@ -54,6 +54,9 @@ void connection_tls_handshake(int fd, int is_incoming) {
   printf("[TLS] : handshake failed\n");
 }
 
+/*
+ * Устанавливаем соединение после получения нужных данных из HELLO
+ */
 void connection_try_connect(const char *fp, const char *name, const char *ip,
                             uint16_t port) {
   node_t *node = node_find(-1, fp, name);
@@ -90,6 +93,7 @@ void connection_try_connect(const char *fp, const char *name, const char *ip,
 
   log_info("TCP connected to %s (%s) @ %s:%u, fd=%d", name, fp, ip, port, cfd);
 
+  // Начинаем рукопожатие как инициатор
   connection_tls_handshake(cfd, 0);
 }
 
@@ -180,13 +184,6 @@ void connection_handle_peer_data(int fd, uint32_t events) {
     file_transfer_start(fd, text);
     return;
   }
-
-  // if (strcmp(text, "FILE END") == 0) {
-  //   // Конец передачи (при передачи через буфер)
-  //   return;
-  // }
-  // Если text == NULL и это не EPOLLHUP — значит данных пока нет (EAGAIN).
-  // Ничего не делаем, epoll сообщит когда будут.
 }
 
 static void _close_connection(node_t *n, void *arg) {

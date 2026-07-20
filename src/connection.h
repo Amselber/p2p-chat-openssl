@@ -16,7 +16,6 @@ void connection_handle_peer_data(int fd, uint32_t events);
 void connection_try_connect(const char *fp, const char *name, const char *ip,
                             uint16_t port);
 
-void connection_tls_handshake(int fd, int is_incoming);
 /* Закрыть все соединения */
 void connection_close_all(void);
 
