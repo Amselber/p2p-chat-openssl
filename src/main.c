@@ -23,7 +23,7 @@ int main(int argc, char **argv) {
 
   config_load(config_path);
   strcpy(g_config.log_level, "debug");
-  g_config.log_to_console = 1;
+  g_config.log_to_console = 0;
   g_config.log_file[0] = '\0';
 
   log_init();
