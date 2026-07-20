@@ -36,6 +36,23 @@ node_t *node_add(const char *fp, const char *name, int fd, int is_incoming);
 node_t *node_find_by_fd(int fd);
 
 /*
+ * Ищет ноду по fingerprint
+ * Возвращает NULL если не найдена.
+ */
+node_t *node_find_by_fp(const char *fp);
+
+/*
+ * Ищет ноду по имени клиента
+ * Возвращает NULL если не найдена.
+ */
+node_t *node_find_by_name(const char *name);
+
+/*
+ * Ищет ноду в следующем приоритете fd > fp > name
+ * Возвращает NULL если не найдена.
+ */
+node_t *node_find(int fd, const char *fp, const char *name);
+/*
  * Вызывает fn для каждой ноды в реестре.
  * arg передаётся вторым аргументом в fn.
  */

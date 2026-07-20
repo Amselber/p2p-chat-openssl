@@ -80,6 +80,41 @@ node_t *node_find_by_fd(int fd) {
   }
   return NULL;
 }
+// Поиск ноды по fingerprint
+node_t *node_find_by_fp(const char *fp) {
+  for (int i = 0; i < ncount; ++i) {
+    if (!strcmp(nodes[i].fp, fp) && nodes[i].fd != -1)
+      return &nodes[i];
+  }
+  return NULL;
+}
+
+// Поиск ноды по имени клиента
+node_t *node_find_by_name(const char *name) {
+  for (int i = 0; i < ncount; ++i) {
+    if (!strcmp(nodes[i].name, name) && nodes[i].fd != -1)
+      return &nodes[i];
+  }
+  return NULL;
+}
+
+// Поиск ноды
+node_t *node_find(int fd, const char *fp, const char *name) {
+  node_t *node = NULL;
+  if (fd != -1) {
+    node = node_find_by_fd(fd);
+  }
+
+  if ((fp != NULL) && !node) {
+    node = node_find_by_fp(fp);
+  }
+
+  if ((name != NULL) && !node) {
+    node = node_find_by_name(name);
+  }
+
+  return node;
+}
 
 // Обход всех нод. Вызываем callback fn для каждой ноды
 void node_each(void (*fn)(node_t *n, void *arg), void *arg) {
