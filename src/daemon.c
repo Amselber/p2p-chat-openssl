@@ -20,47 +20,31 @@
 
 #include "daemon.h"
 #include "cli.h"
+#include "commands.h"
 #include "config.h"
+#include "connection.h"
 #include "discovery.h"
 #include "log.h"
 #include "node.h"
 #include "transport.h"
-#include <dirent.h>
 #include <fcntl.h>
 #include <signal.h>
 #include <stddef.h>
 #include <stdint.h>
 #include <stdio.h>
-#include <string.h>
 #include <sys/epoll.h>
-#include <sys/stat.h>
 #include <time.h>
 #include <unistd.h>
 
 /* ─── Константы ─── */
-#define MAX_TRANSFERS 4
 #define MAX_EVENTS 16
 
-/* ─── Состояние передачи файла ─── */
-
-typedef enum { XFER_NONE, XFER_DATA } xfer_state_t;
-
-typedef struct {
-  int fd;
-  xfer_state_t state;
-  char fname[256];
-  size_t size;
-  size_t received;
-  FILE *file;
-} file_transfer_t;
-
 /* ─── Глобальные переменные ─── */
-static volatile int running = 1;
+volatile int running = 1;
 static int epfd;
 static int udp_fd;
 static int tcp_fd;
 static uint16_t tcp_port = 0; // 0 - OS Selected
-static file_transfer_t g_xfers[MAX_TRANSFERS];
 
 /* ———  Хелпер: сон в миллисекундах ——— */
 static void sleep_ms(int ms) {
@@ -68,40 +52,9 @@ static void sleep_ms(int ms) {
   nanosleep(&ts, NULL);
 }
 
-/* ─── Обработчик сигналов ─── */
-
-/*
- * on_signal — вызывается при Ctrl+C (SIGINT) или kill (SIGTERM)
- * Устанавливает running = 0, главный цикл корректно завершается.
- */
-static void on_signal(int s) {
-  (void)s;
-  log_info("Signal %d received, shutting down", s);
-  running = 0;
-}
-
-/* ─── Вспомогательные структуры для node_each ─── */
-
 struct broadcast_args {
   const char *text; // текст для отправки
 };
-
-struct find_args {
-  const char *fp;   // fingerprint для поиска
-  const char *name; // имя для поиска
-  int *found_fd;    // [выход] найденный fd или -1
-};
-
-/* ─── Коллбеки для node_each ─── */
-
-/*
- * print_node — вывод информации об узле (для /nodes)
- */
-static void print_node(node_t *n, void *arg) {
-  (void)arg;
-  printf("  %-10s : %u : %s [%s]\n", n->name, n->is_incoming, n->fp,
-         n->fd != -1 ? "online" : "offline");
-}
 
 /*
  * send_to_node — отправка сообщения одному узлу
@@ -118,664 +71,16 @@ static void send_to_node(node_t *n, void *arg) {
   }
 }
 
-/*
- * find_by_fp — поиск узла по fingerprint в реестре
- */
-static void find_node_by_fp(node_t *n, void *arg) {
-  struct find_args *a = (struct find_args *)arg;
-  if (!strcmp(n->fp, a->fp) && n->fd != -1)
-    *a->found_fd = n->fd;
-}
+/* ─── Обработчик сигналов ─── */
 
 /*
- * find_by_name — поиск узла по имени в реестре
+ * on_signal — вызывается при Ctrl+C (SIGINT) или kill (SIGTERM)
+ * Устанавливает running = 0, главный цикл корректно завершается.
  */
-static void find_node_by_name(node_t *n, void *arg) {
-  struct find_args *a = (struct find_args *)arg;
-  if (!strcmp(n->name, a->name) && n->fd != -1)
-    *a->found_fd = n->fd;
-}
-
-/*
- * do_tls_handshake — выполняет TLS-рукопожатие для одного узла.
- * Вызывается из команды /tls и из /tls_all.
- */
-static void do_tls_handshake(int fd, int is_incoming) {
-  // Отсутствует TCP-соединение с узлом
-  if (!fd || fd == -1)
-    return; // офлайн
-
-  // Ожидаем TLS-рукопожатие?
-  if (!transport_tls_pending(fd))
-    return;
-
-  log_debug("do_tls_handshake ENTER: fd=%d, is_incoming=%d, pending=%d", fd,
-            is_incoming, transport_tls_pending(fd));
-  int rc = -1;
-  if (!is_incoming) {
-    rc = transport_tls_connect(fd);
-  } else {
-    rc = transport_tls_accept(fd);
-  }
-
-  if (rc == 0) {
-    const char *peer_fp = transport_peer_fingerprint(fd);
-    const char *peer_name = transport_peer_name(fd);
-
-    if (peer_fp) {
-      log_info("TLS established with %s (%s), fd=%d",
-               peer_name ? peer_name : "?", peer_fp, fd);
-      node_add(peer_fp, peer_name ? peer_name : "?", fd, is_incoming);
-      printf("[TLS] %s verified\n", peer_name ? peer_name : peer_fp);
-      fflush(stdout);
-    }
-    log_debug("do_tls_handshake EXIT: fd=%d", fd);
-    printf("> ");
-    fflush(stdout);
-    return;
-  }
-
-  log_debug("do_tls_handshake EXIT: fd=%d", fd);
-  if (errno == EAGAIN) {
-    printf("[TLS] : handshake in progress...\n");
-    return;
-  }
-
-  printf("[TLS] : handshake failed\n");
-}
-
-// static void receive_file(int fd, const char *fname, size_t size) {
-//   char path[512];
-//   snprintf(path, sizeof(path), "downloads/%s", fname);
-//
-//   FILE *f = fopen(path, "wb");
-//   if (!f) {
-//     log_warn("Cannot create file: %s", path);
-//     return;
-//   }
-//
-//   char buf[8192];
-//   size_t received = 0;
-//
-//   while (received < size) {
-//     size_t to_read = sizeof(buf);
-//     if (size - received < to_read)
-//       to_read = (size_t)(size - received);
-//
-//     const char *data = transport_recv_raw(fd, to_read);
-//     if (!data) {
-//       log_warn("File transfer interrupted");
-//       break;
-//     }
-//
-//     fwrite(data, 1, to_read, f);
-//     received += to_read;
-//   }
-//
-//   fclose(f);
-//   log_info("File received: %s (%ld bytes)", fname, received);
-//   printf("\r[FILE] %s received (%ld bytes)\n> ", fname, received);
-//   fflush(stdout);
-// }
-//
-
-/*
- * ================================================================
- * ===================== Передача файлов ==========================
- * ================================================================
- */
-
-static file_transfer_t *find_transfer(int fd) {
-  for (int i = 0; i < MAX_TRANSFERS; i++) {
-    if (g_xfers[i].fd == fd && g_xfers[i].state != XFER_NONE)
-      return &g_xfers[i];
-  }
-  return NULL;
-}
-
-static file_transfer_t *alloc_transfer(int fd) {
-  for (int i = 0; i < MAX_TRANSFERS; i++) {
-    if (g_xfers[i].state == XFER_NONE) {
-      memset(&g_xfers[i], 0, sizeof(g_xfers[i]));
-      g_xfers[i].fd = fd;
-      return &g_xfers[i];
-    }
-  }
-  return NULL;
-}
-
-static void cleanup_transfer(int fd) {
-  file_transfer_t *xfer = find_transfer(fd);
-  if (xfer) {
-    if (xfer->file)
-      fclose(xfer->file);
-    memset(xfer, 0, sizeof(*xfer));
-  }
-}
-
-static void receive_chunk(file_transfer_t *xfer) {
-  char buf[8192];
-
-  while (xfer->received < xfer->size) {
-    size_t remaining = xfer->size - xfer->received;
-    size_t to_read = sizeof(buf);
-    if (remaining < to_read)
-      to_read = (size_t)remaining;
-
-    ssize_t n = transport_recv_raw(xfer->fd, buf, to_read);
-
-    if (n <= 0) {
-      if (errno == EAGAIN || errno == EWOULDBLOCK)
-        return;
-      log_warn("File read error: fd=%d, n=%zd, errno=%d", xfer->fd, n, errno);
-      fclose(xfer->file);
-      memset(xfer, 0, sizeof(*xfer));
-      return;
-    }
-
-    fwrite(buf, 1, (size_t)n, xfer->file);
-    xfer->received += (size_t)n;
-  }
-
-  fclose(xfer->file);
-  log_info("File received: %s (%ld bytes)", xfer->fname, xfer->received);
-  printf("\r[FILE] %s received (%ld bytes)\n> ", xfer->fname, xfer->received);
-  fflush(stdout);
-  memset(xfer, 0, sizeof(*xfer));
-}
-
-static void start_transfer(int fd, const char *header) {
-  file_transfer_t *xfer = alloc_transfer(fd);
-  if (!xfer) {
-    log_warn("Too many transfers");
-    return;
-  }
-
-  char fname[256];
-  size_t size;
-  if (sscanf(header, "FILE:%255[^:]:%lu", fname, &size) != 2) {
-    log_warn("Bad header: %s", header);
-    memset(xfer, 0, sizeof(*xfer));
-    return;
-  }
-
-  char path[512];
-  snprintf(path, sizeof(path), "downloads/%s", fname);
-
-  xfer->file = fopen(path, "wb");
-  if (!xfer->file) {
-    log_warn("Cannot create: %s", path);
-    memset(xfer, 0, sizeof(*xfer));
-    return;
-  }
-
-  xfer->size = size;
-  xfer->state = XFER_DATA;
-  strncpy(xfer->fname, fname, 255);
-  xfer->fname[255] = '\0';
-
-  node_t *n = node_find_by_fd(fd);
-  printf("\r[%s] Receiving: %s (%lu bytes)\n> ", n ? n->name : "?", fname,
-         size);
-  fflush(stdout);
-
-  receive_chunk(xfer);
-}
-
-/*
- * ================================================================
- * ========================= Команды CLI ==========================
- * ================================================================
- */
-
-/*
- * cmd_quit — /quit
- * Завершает главный цикл.
- */
-static CommandResult cmd_quit(int argc, char **argv) {
-  (void)argc;
-  (void)argv;
-  log_info("User requested quit");
+static void on_signal(int s) {
+  (void)s;
+  log_info("Signal %d received, shutting down", s);
   running = 0;
-  return result_success(NULL);
-}
-
-/*
- * cmd_help — /help
- * Показывает справку по командам.
- */
-static CommandResult cmd_help(int argc, char **argv) {
-  (void)argc;
-  (void)argv;
-  cli_show_help();
-  return result_success(NULL);
-}
-
-/*
- * cmd_echo — /echo <text>
- * Повторяет введённый текст (для отладки CLI).
- */
-static CommandResult cmd_echo(int argc, char **argv) {
-  if (argc < 1)
-    return result_error("Usage: /echo <text>");
-  static char buf[256];
-  buf[0] = 0;
-  for (int i = 0; i < argc; i++) {
-    if (i > 0)
-      strcat(buf, " ");
-    strcat(buf, argv[i]);
-  }
-  return result_success(buf);
-}
-
-/*
- * cmd_config — /config
- * Показывает текущую конфигурацию.
- */
-static CommandResult cmd_config(int argc, char **argv) {
-  (void)argc;
-  (void)argv;
-  static char buf[1024];
-  snprintf(buf, sizeof(buf),
-           "multicast: %s:%u\n"
-           "hello: %d sec\n"
-           "my_fp: %s\n"
-           "my_name: %s\n"
-           "ca: %s\n"
-           "cert: %s",
-           g_config.multicast_addr, g_config.multicast_port,
-           g_config.hello_interval,
-           g_config.my_fp[0] ? g_config.my_fp : "(not set)",
-           g_config.my_name[0] ? g_config.my_name : "(not set)",
-           g_config.ca_cert, g_config.my_cert);
-  return result_success(buf);
-}
-
-/*
- * cmd_nodes — /nodes
- * Показывает список известных узлов.
- */
-static CommandResult cmd_nodes(int argc, char **argv) {
-  (void)argc;
-  (void)argv;
-  log_debug("Listing nodes");
-  printf("\rNodes:\n");
-  node_each(print_node, NULL);
-  return result_success(NULL);
-}
-
-/*
- * cmd_msg — /msg <name-or-fp> <text>
- * Отправляет приватное сообщение узлу.
- *
- * Поиск: сначала по имени, затем по fingerprint.
- */
-static CommandResult cmd_msg(int argc, char **argv) {
-  if (argc < 2) {
-    log_warn("/msg called with insufficient arguments");
-    return result_error("Usage: /msg <fp> <text>");
-  }
-
-  // Ищем узел
-  int found_fd = -1;
-  struct find_args a = {argv[0], argv[0], &found_fd};
-
-  node_each(find_node_by_name, &a);
-  if (found_fd == -1)
-    node_each(find_node_by_fp, &a);
-
-  if (found_fd == -1) {
-    log_warn("Node not online: %s", argv[0]);
-    return result_error("Node not online");
-  }
-
-  // Собираем текст сообщения из оставшихся аргументов
-  static char text[4096];
-  text[0] = '\0';
-  for (int i = 1; i < argc; ++i) {
-    if (i > 1)
-      strcat(text, " ");
-    strcat(text, argv[i]);
-  }
-
-  // Отправляем
-  if (transport_send(found_fd, text) < 0) {
-    log_warn("Failed to send to %s", argv[0]);
-    return result_error("Send failed");
-  }
-
-  log_debug("[msg → %s]: %s", argv[0], text);
-  return result_success(NULL);
-}
-
-static CommandResult cmd_send_hello(int argc, char **argv) {
-  (void)argc;
-  (void)argv;
-  discovery_send_hello(udp_fd, g_config.my_fp, g_config.my_name,
-                       g_config.multicast_addr, g_config.multicast_port,
-                       tcp_port);
-
-  return result_success(NULL);
-}
-
-/*
- * /tls <name-or-fp>
- * Запускает TLS-рукопожатие с указанным узлом.
- */
-static CommandResult cmd_tls(int argc, char **argv) {
-  if (argc < 2) {
-    log_warn("/_tls called with insufficient arguments");
-    return result_error("Usage: /_tls <name-or-fp> <is_incoming>[1, 0]");
-  }
-
-  // Ищем узел
-  int found_fd = -1;
-  struct find_args a = {argv[0], argv[0], &found_fd};
-
-  node_each(find_node_by_name, &a);
-  if (found_fd == -1)
-    node_each(find_node_by_fp, &a);
-
-  if (found_fd == -1) {
-    log_warn("Node not online: %s", argv[0]);
-    return result_error("Node not online");
-  }
-
-  if (!found_fd || found_fd == -1)
-    return result_error("Node not online");
-
-  if (!transport_tls_pending(found_fd))
-    return result_success("TLS already established");
-
-  printf("tls argv: %s %s %s", argv[0], argv[1], argv[2]);
-  do_tls_handshake(found_fd, 0);
-
-  if (!transport_tls_pending(found_fd))
-    return result_success("TLS established");
-  else if (errno == EAGAIN)
-    return result_success("TLS handshake in progress");
-  else
-    return result_error("TLS handshake failed");
-}
-
-/*
- * /ls [path]
- * Показывает файлы в директории загрузок (или указанной).
- * Без аргументов — downloads/
- */
-static CommandResult cmd_ls(int argc, char **argv) {
-  const char *path = "downloads";
-  if (argc >= 1)
-    path = argv[0];
-
-  DIR *dir = opendir(path);
-  if (!dir)
-    return result_error("Cannot open directory");
-
-  printf("\r%-40s %10s\n", "Name", "Size");
-  printf("%-40s %10s\n", "----------------------------------------",
-         "----------");
-
-  struct dirent *entry;
-  struct stat st;
-  char fullpath[512];
-
-  while ((entry = readdir(dir)) != NULL) {
-    if (entry->d_name[0] == '.')
-      continue; // пропускаем . и ..
-
-    snprintf(fullpath, sizeof(fullpath), "%s/%s", path, entry->d_name);
-    if (stat(fullpath, &st) == 0 && S_ISREG(st.st_mode)) {
-      long size = st.st_size;
-      char sizestr[64];
-      if (size < 1024)
-        snprintf(sizestr, sizeof(sizestr), "%ld B", (long)size);
-      else if (size < 1024 * 1024)
-        snprintf(sizestr, sizeof(sizestr), "%ld KB", (long)size / 1024);
-      else
-        snprintf(sizestr, sizeof(sizestr), "%ld MB",
-                 (long)size / (1024 * 1024));
-
-      printf("  %-38s %10s\n", entry->d_name, sizestr);
-    }
-  }
-
-  closedir(dir);
-  return result_success(NULL);
-}
-
-/*
- * /file <name-or-fp> <path>
- * Отправляет файл указанному узлу.
- */
-static CommandResult cmd_file(int argc, char **argv) {
-  if (argc < 2)
-    return result_error("Usage: /file <name-or-fp> <path>");
-
-  // Ищем узел
-  int found_fd = -1;
-  struct find_args a = {argv[0], argv[0], &found_fd};
-  node_each(find_node_by_name, &a);
-  if (found_fd == -1)
-    return result_error("Node not online");
-
-  // if (transport_tls_pending(found_fd))
-  //   return result_error("TLS not ready");
-
-  /* Открываем файл */
-  FILE *f = fopen(argv[1], "rb");
-  if (!f) {
-    log_error("Cannot open file: %s", argv[1]);
-    return result_error("Cannot open file");
-  }
-
-  /* Размер файла */
-  fseek(f, 0, SEEK_END);
-  ssize_t size = ftell(f);
-  rewind(f);
-
-  /* Имя файла (без пути) */
-  const char *fname = strrchr(argv[1], '/');
-  fname = fname ? fname + 1 : argv[1];
-
-  /* Отправляем заголовок */
-  char header[512];
-  snprintf(header, sizeof(header), "FILE:%s:%ld", fname, size);
-  if (transport_send(found_fd, header) < 0) {
-    fclose(f);
-    return result_error("Send failed");
-  }
-
-  /* Отправляем данные */
-  char buf[8192];
-  size_t n;
-  size_t sent = 0;
-
-  while ((n = fread(buf, 1, sizeof(buf), f)) > 0) {
-    if (transport_send_raw(found_fd, buf, n) < 0) {
-      fclose(f);
-      return result_error("Send failed");
-    }
-    sent += n;
-  }
-
-  fclose(f);
-
-  /* Отправляем конец */
-  transport_send(found_fd, "FILE_END");
-
-  log_info("File sent: %s (%ld bytes) to %s", fname, sent, argv[0]);
-  static char msg[256];
-  snprintf(msg, sizeof(msg), "Sent %s (%ld bytes)", fname, sent);
-  return result_success(msg);
-}
-
-// Регистрация всех команд
-static void register_commands(void) {
-  static Command cmds[] = {{"quit", "Exit", cmd_quit},
-                           {"help", "Show this help", cmd_help},
-                           {"echo", "Echo text", cmd_echo},
-                           {"config", "Show configuration", cmd_config},
-                           {"msg", "Send private message", cmd_msg},
-                           {"nodes", "List connected nodes", cmd_nodes},
-                           {"_hello", "Discovery send HELLO", cmd_send_hello},
-                           {"_tls", "TLS handshake with node", cmd_tls},
-                           {"file", "Send file to node", cmd_file},
-                           {"ls", "List file in downloads idr", cmd_ls},
-                           {NULL, NULL, NULL}};
-
-  int i;
-  for (i = 0; cmds[i].name; ++i)
-    cli_register(&cmds[i]);
-
-  log_debug("Registered %d commands", i);
-}
-
-/*
- * ================================================================
- * ========================= Подключение к узлу ===================
- * ================================================================
- */
-
-/*
- * try_connect — устанавливает TCP+TLS соединение с узлом
- *
- * Порядок:
- *   1. Проверяем, не подключены ли уже к этому узлу (по fingerprint)
- *   2. transport_connect()     — TCP-соединение
- *   3. transport_tls_connect() — TLS-рукопожатие
- *   4. Сверяем fingerprint из HELLO с сертификатом
- *   5. Добавляем узел в реестр (node_add)
- *   6. Добавляем fd в epoll
- *
- * Если любая проверка не проходит — соединение закрывается.
- */
-// static void try_connect(const char *fp, const char *name, const char *ip,
-//                         uint16_t port, int epfd) {
-//   // 1: Уже подключены?
-//   int found_fd = -1;
-//   struct find_args a = {fp, name, &found_fd};
-//   node_each(find_node_by_fp, &a);
-//   if (found_fd == -1) {
-//     // Ищем по имени
-//     node_each(find_node_by_name, &a);
-//   }
-//   if (found_fd != -1) {
-//     log_debug("Already connected to %s (fd=%d)", name, found_fd);
-//     return; // подключены
-//   }
-//
-//   // 2: Подключаемся по TCP
-//   int cfd = transport_connect(ip, port);
-//   if (cfd < 0) {
-//     log_warn("TCP connect failed to %s @ %s:%u", name, ip, port);
-//     return;
-//   }
-//   log_info("TCP accepted: %u, port: %u", cfd, tcp_port);
-//
-//   // 3: Неблокирующий режим
-//   int flags = fcntl(cfd, F_GETFL, 0);
-//   if (flags >= 0)
-//     fcntl(cfd, F_SETFL, flags | O_NONBLOCK);
-//
-//   // 4: Добавляем узел в реестр
-//   node_add(fp, name, cfd, 0);
-//
-//   // 5: Добавляем fd в epoll
-//   struct epoll_event ev = {.events = EPOLLIN, .data.fd = cfd};
-//   epoll_ctl(epfd, EPOLL_CTL_ADD, cfd, &ev);
-//
-//   log_info("TCP connected to %s (%s) @ %s:%u, fd=%d", name, fp, ip, port,
-//   cfd); printf("\r[%s connected]\n> ", name); fflush(stdout);
-// }
-
-/*
- * handle_incoming — обработка входящего TCP-соединения
- *
- * Порядок:
- *   1. transport_accept()     — принимаем TCP
- *   2. transport_tls_accept() — TLS-рукопожатие (серверная сторона)
- *   3. Извлекаем fingerprint и имя из сертификата пира
- *   4. Добавляем узел в реестр
- *   5. Добавляем fd в epoll
- */
-static void handle_incoming(int tcp_fd) {
-  // 1: принимаем TCP-соединение
-  int cfd = transport_accept(tcp_fd);
-  if (cfd < 0)
-    return;
-
-  // 2: неблокирующий режим
-  int flags = fcntl(cfd, F_GETFL, 0);
-  if (flags >= 0)
-    fcntl(cfd, F_SETFL, flags | O_NONBLOCK);
-
-  // 3: добавляем узел
-  node_add(NULL, NULL, cfd, 1);
-
-  // 6: добавляем в epoll
-  struct epoll_event ev = {.events = EPOLLIN, .data.fd = cfd};
-  epoll_ctl(epfd, EPOLL_CTL_ADD, cfd, &ev);
-
-  log_info("TCP accepted, fd=%d", cfd);
-  printf("\r\n> ");
-  fflush(stdout);
-
-  // 2. Начинаем TLS-рукопожатие
-  // do_tls_handshake(tcp_fd, 0);
-}
-
-/*
- * handle_peer_data — обработка данных от подключённого узла
- *
- * Вызывается когда epoll сообщает, что на fd есть данные (EPOLLIN).
- * Читаем строку через transport_recv и выводим на экран.
- */
-static void handle_peer_data(int fd, uint32_t events) {
-  node_t *n = node_find_by_fd(fd);
-
-  // Проверяем, не закрыто ли соединение
-  if (events & (EPOLLHUP | EPOLLRDHUP)) {
-    cleanup_transfer(fd);
-    if (n) {
-      log_info("Disconnected: %s (fd=%d)", n->name, fd);
-      printf("\r[%s disconnected]\n> ", n->name);
-      n->fd = -1;
-    }
-    epoll_ctl(epfd, EPOLL_CTL_DEL, fd, NULL);
-    transport_tls_close(fd);
-    transport_close(fd);
-    fflush(stdout);
-    return;
-  }
-
-  // Если TLS ещё не готов — продолжаем рукопожатие
-  do_tls_handshake(fd, n->is_incoming);
-
-  // Читаем сообщение
-  const char *text = transport_recv(fd);
-
-  if (!text)
-    return;
-
-  if (text) {
-    // Сообщение получено — выводим
-    printf("\r[%s]: %s\n> ", n ? n->name : "???", text);
-    fflush(stdout);
-  }
-
-  if (strncmp(text, "FILE:", 5) == 0) {
-    // Начало передачи
-    start_transfer(fd, text);
-    return;
-  }
-
-  // if (strcmp(text, "FILE END") == 0) {
-  //   // Конец передачи (при передачи через буфер)
-  //   return;
-  // }
-  // Если text == NULL и это не EPOLLHUP — значит данных пока нет (EAGAIN).
-  // Ничего не делаем, epoll сообщит когда будут.
 }
 
 /*
@@ -784,6 +89,7 @@ static void handle_peer_data(int fd, uint32_t events) {
  * ================================================================
  */
 
+// Обработчик ввода
 static void handle_stdin(void) {
   static char buf[256];
   static int pos = 0;
@@ -853,64 +159,8 @@ static void handle_stdin(void) {
 static void handle_discovery(int fd) {
   char ip[64], fp[65], name[64];
   uint16_t port;
-
-  while (discovery_recv(fd, ip, fp, name, &port) == 1) {
-    // Игнорируем свои пакеты
-    if (!strcmp(g_config.my_fp, fp))
-      continue;
-
-    // Правило: меньший fp не подулючается к большему
-    // (ждёт входящее от него)
-    if (strcmp(g_config.my_fp, fp) > 0) {
-      // log_debug("I'm senior to %s, waiting for incoming", name);
-      return;
-    }
-    // log_debug("I'm junior to %s, connecting", name);
-
-    // log_debug("Discovered: %s (%s) @ %s:%u", name, fp, ip, port);
-    // printf("\r[%s discovered %s:%u]\n> ", name, ip, port);
-    // fflush(stdout);
-
-    // 1: Уже подключены?
-    int found_fd = -1;
-    struct find_args a = {fp, name, &found_fd};
-    node_each(find_node_by_fp, &a);
-    if (found_fd == -1) {
-      // Ищем по имени
-      node_each(find_node_by_name, &a);
-    }
-    if (found_fd != -1) {
-      // log_debug("Already connected to %s (fd=%d)", name, found_fd);
-      return; // подключены
-    }
-
-    // 2: Подключаемся по TCP
-    int cfd = transport_connect(ip, port);
-    if (cfd < 0) {
-      log_warn("TCP connect failed to %s @ %s:%u", name, ip, port);
-      return;
-    }
-    log_info("TCP accepted: %u, port: %u", cfd, tcp_port);
-
-    // 3: Неблокирующий режим
-    int flags = fcntl(cfd, F_GETFL, 0);
-    if (flags >= 0)
-      fcntl(cfd, F_SETFL, flags | O_NONBLOCK);
-
-    // 4: Добавляем узел в реестр
-    node_add(fp, name, cfd, 0);
-
-    // 5: Добавляем fd в epoll
-    struct epoll_event ev = {.events = EPOLLIN, .data.fd = cfd};
-    epoll_ctl(epfd, EPOLL_CTL_ADD, cfd, &ev);
-
-    log_info("TCP connected to %s (%s) @ %s:%u, fd=%d", name, fp, ip, port,
-             cfd);
-    printf("\r[%s connected]\n> ", name);
-    fflush(stdout);
-
-    do_tls_handshake(cfd, 0);
-  }
+  while (discovery_recv(fd, ip, fp, name, &port) == 1)
+    connection_try_connect(fp, name, ip, port);
 }
 
 /*
@@ -926,7 +176,7 @@ int daemon_run(void) {
   signal(SIGTERM, on_signal);
 
   // Регистрация команд
-  register_commands();
+  commands_register();
 
   // ——— Инициализация TLS ———
   // Загружаем сертификаты, настраиваем mTLS, вычисляем свой fingerprint
@@ -942,6 +192,7 @@ int daemon_run(void) {
     log_errno("epoll_create1");
     return 1;
   }
+  connection_init(epfd);
 
   // События epoll для наблюдения за fd
   // EPOLLIN пробуждение при появлении данных для чтения
@@ -1072,9 +323,9 @@ int daemon_run(void) {
         handle_discovery(fd);
       // ***** TCP incomming *****
       else if (fd == tcp_fd) // Обарботка данных пира
-        handle_incoming(fd);
+        connection_handle_incoming(fd);
       else
-        handle_peer_data(fd, evs[i].events);
+        connection_handle_peer_data(fd, evs[i].events);
     }
 
     // Периодический HELLO
