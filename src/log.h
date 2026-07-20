@@ -3,6 +3,7 @@
 #define LOG_H
 
 #include <errno.h>
+#include <string.h>
 
 typedef enum {
   LOG_DEBUG,
